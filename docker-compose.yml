@@ -1,0 +1,150 @@
+# The platform: Apache Airflow 3 + a Databricks target. Names no product.
+#
+# The product arrives two ways, and they are DIFFERENT MECHANISMS that people
+# routinely conflate:
+#
+#   its DAG FILES      -> a bundle (bind mount here, GitDagBundle in production)
+#   its DEPENDENCIES   -> uv pip install of its pyproject.toml into the worker
+#
+# The bundle delivers files and installs nothing. A product whose DAGs import a
+# library the worker lacks parses fine and fails at run time.
+#
+# WHAT THIS PLATFORM IS FOR. fabric-platform-airflow3 already proves an external
+# Airflow 3 can drive a medallion; databricks-platform-jobs already proves the
+# Databricks steps produce the family's numbers. This is the cell where those
+# two claims meet: the same product, the same orchestrator, a different engine.
+# If the orchestrator were really portable, this platform is what shows it.
+#
+# PORTS ARE ITS OWN. The Jobs platform publishes 18470/18471/18170 and the
+# Fabric Airflow platform publishes 18080; a fourth stack on one machine must
+# not fight any of them, and a collision reports as a bind failure naming
+# neither side.
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-16}
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 3s
+      retries: 20
+
+  uc:
+    image: unitycatalog/unitycatalog:${UC_VERSION:?see versions.env}
+    ports:
+      - "18476:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/2.1/unity-catalog/catalogs"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 20s
+
+  sail:
+    image: ghcr.io/calvinchengx/fabric-emulator-sail:${SAIL_VERSION:?see versions.env}
+    depends_on:
+      uc: {condition: service_healthy}
+    volumes:
+      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+    environment:
+      SAIL_SPARK__SESSION_TIMEOUT_SECS: "3600"
+      RUST_LOG: "info"
+      UNITY_ALLOW_HTTP_URL: "true"
+      SAIL_CATALOG__DEFAULT_CATALOG: sail
+      SAIL_CATALOG__LIST: '[{name="sail", type="memory", initial_database=["default"]}, {type="unity", name="contoso", uri="http://uc:8080/api/2.1/unity-catalog", default_catalog="contoso"}]'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  spark-agent:
+    image: ghcr.io/calvinchengx/fabric-emulator-spark-agent:${SPARK_AGENT_VERSION:?see versions.env}
+    depends_on:
+      sail: {condition: service_healthy}
+    volumes:
+      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+    environment:
+      SPARK_REMOTE: "sc://sail:50051"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/health', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  databricks:
+    image: ghcr.io/calvinchengx/databricks-emulator:${DATABRICKS_EMULATOR_VERSION:?see versions.env}
+    depends_on:
+      spark-agent: {condition: service_healthy}
+      uc: {condition: service_healthy}
+    ports:
+      - "18475:8447"
+    volumes:
+      - ${DATABRICKS_DATA:-./data}:/data
+      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+    environment:
+      DATABRICKS_ADDR: "0.0.0.0:8447"
+      DATABRICKS_DATA_DIR: /data
+      DATABRICKS_SPARK_AGENT_URL: "http://spark-agent:8099"
+      DATABRICKS_UC_URL: "http://uc:8080/api/2.1/unity-catalog"
+    healthcheck:
+      test: ["CMD", "databricks-emulator", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  airflow:
+    build:
+      context: ${PRODUCT}/..
+      dockerfile: ${PWD}/Dockerfile.worker
+      args:
+        AIRFLOW_VERSION: ${AIRFLOW_VERSION:-3.3.1}
+        PRODUCT_DIR: ${PRODUCT_NAME:-product}
+    depends_on:
+      postgres: {condition: service_healthy}
+      databricks: {condition: service_healthy}
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      # THE BUNDLE. Rooted at the product's `dags/` SUBDIRECTORY, which is the
+      # production shape too -- GitDagBundle takes a subdir the same way.
+      AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST: >-
+        [{"name":"product","classpath":"airflow.dag_processing.bundles.local.LocalDagBundle","kwargs":{"path":"/opt/product/dags"}}]
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "5"
+      # AIRFLOW 3 RUNS TASKS THROUGH THE API SERVER, not the metadata DB. A
+      # stack without api-server fails every task with
+      # `httpcore.ConnectError: [Errno 111] Connection refused`.
+      AIRFLOW__API__BASE_URL: "http://localhost:8080"
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://localhost:8080/execution/"
+      AIRFLOW__API_AUTH__JWT_SECRET: "${AIRFLOW_JWT_SECRET:-local-dev-not-a-secret}"
+      # PINNED, and it has to be. Airflow INVENTS a Fernet key when none is set
+      # while postgres keeps what it encrypted with the previous one, so the
+      # first `make up` works and every one after fails with InvalidToken on any
+      # stored credential -- which reads like a provisioning bug.
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-Zp8kRr7vQ2mN4xJ6wL9tY3bV5cX1aS0dF7gH8jK2lM4=}"
+      # WHERE THE TARGET IS, by SERVICE NAME. The steps this product runs were
+      # written for a host shell talking to published ports; inside the compose
+      # network the same env vars name services instead, which is the whole
+      # reason they are env vars and not constants.
+      DATABRICKS_EMULATOR_URL: "http://databricks:8447"
+      DATABRICKS_SPARK_CONNECT_URL: "http://spark-agent:8099"
+      DATABRICKS_UC_URL: "http://uc:8080"
+      DATABRICKS_TARGET: emulator
+      CONTOSO_DELTA: /data/delta
+    ports:
+      - "${AIRFLOW_PORT:-18082}:8080"
+    volumes:
+      - ${PRODUCT:?set PRODUCT to a data product repo, or run via make up}:/opt/product:ro
+      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+      - ${DATABRICKS_DATA:-./data}:/emu-data
+    command: bash -c "airflow db migrate && exec airflow standalone"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v2/version', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 60s

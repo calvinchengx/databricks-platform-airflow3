@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+# The product this platform is pointed at -- a mount point, never content.
+product
+data/
