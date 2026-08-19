@@ -19,15 +19,37 @@ PASSWORD_FILE := /opt/airflow/simple_auth_manager_passwords.json.generated
 COMPOSE := PRODUCT=$(PRODUCT_ABS) PRODUCT_NAME=$(PRODUCT_NAME) SOURCES=$(SOURCES_ABS) PWD=$(CURDIR) \
            docker compose -p $(PROJECT) -f docker-compose.yml -f $(FRAGMENT)
 
-.PHONY: help up down logs connections creds doctor sources trigger
+.PHONY: help up down logs connections creds doctor sources trigger prepare
 help: ## This list
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t20
 
-up: doctor sources ## Build the worker from the product's pyproject.toml and start the stack
+up: doctor sources prepare ## Build the worker from the product's pyproject.toml and start the stack
 	@echo "platform: product = $(PRODUCT_ABS)"
 	@echo "platform: sources = $(SOURCES_ABS)"
 	$(COMPOSE) up --build -d
 	@echo "platform: Airflow on http://localhost:$${AIRFLOW_PORT:-18080}"
+
+prepare: ## Run the product's own pre-start step, if it declares one
+# THE PLATFORM DOES NOT KNOW WHAT PREPARING MEANS. It asks the product whether
+# it has a `prepare` target and runs it if so -- exactly as it asks the product
+# for its dependencies without learning what they are.
+#
+# This exists because a product can have work that must happen BEFORE the worker
+# image is built and the DAGs are parsed, and only the product knows what.
+# contoso-data-product-databricks-airflow3 builds a dbt manifest here: cosmos
+# renders its gold graph at DAG-parse time, and without the manifest it would
+# silently render a graph missing every ODCS contract.
+#
+# A product with nothing to do says nothing and this is a no-op. A product whose
+# prepare FAILS stops `up`, which is the point -- starting a stack whose DAGs
+# cannot render is a slower way to learn the same thing.
+	@if [ -f "$(PRODUCT_ABS)/Makefile" ] && \
+	    $(MAKE) -C "$(PRODUCT_ABS)" -n prepare >/dev/null 2>&1; then \
+	  echo "platform: $(PRODUCT_NAME) declares a prepare step -- running it"; \
+	  $(MAKE) -C "$(PRODUCT_ABS)" prepare; \
+	else \
+	  echo "platform: $(PRODUCT_NAME) declares no prepare step"; \
+	fi
 
 sources: ## Generate the compose fragment for the vendors a sources repo declares
 	@test -f "$(SOURCES_ABS)/sources.yaml" || { \
