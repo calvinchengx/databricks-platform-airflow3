@@ -1,0 +1,94 @@
+# The platform carries no product, so its CI proves the two things it DOES
+# own: the vendor generator, and that the stack it describes is a valid one.
+#
+# The same checks as fabric-platform-airflow3, because this cell is the same
+# platform shape pointed at a different engine, and scripts/sources.py,
+# scripts/start.sh and scripts/set_release.py are byte-identical to that
+# repo's. Both checks exist because of real failures there: `make sources`
+# once declared itself up to date against a stray directory and silently left
+# a vendor out of the stack; and `${SOURCES:-./sources}` mounted an empty
+# directory Docker had created, so the vendors vanished with no error and the
+# symptom surfaced much later as missing connections.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: start.sh is valid shell
+        run: |
+          bash -n scripts/start.sh
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning scripts/start.sh
+
+      - name: the vendor generator refuses what it should
+        run: |
+          python3 -m py_compile scripts/sources.py scripts/set_release.py
+          mkdir -p /tmp/src
+          cat > /tmp/src/sources.yaml <<'YAML'
+          version: 1
+          vendors:
+            - name: acme
+              conn: acme
+              kind: openapi
+              spec: acme/openapi.yaml
+              script: acme/serve.js
+              data: _data/acme
+              port: 8090
+              formats: [csv]
+          YAML
+          sed -i 's/^          //' /tmp/src/sources.yaml
+          printf 'MOKAPI_VERSION=0.50.0\n' > /tmp/src/versions.env
+          python3 scripts/sources.py /tmp/src/sources.yaml /tmp/src > /tmp/frag.yml
+          python3 -c "import json; d=json.load(open('/tmp/frag.yml')); assert d['services'], d; print('vendors:', list(d['services']))"
+          # An unknown kind must be a hard error, not a quietly skipped vendor.
+          printf 'version: 1\nvendors:\n  - name: nope\n    kind: telepathy\n' > /tmp/src/bad.yaml
+          if python3 scripts/sources.py /tmp/src/bad.yaml /tmp/src > /dev/null 2>&1; then
+            echo "::error::an unknown vendor kind was accepted"; exit 1
+          fi
+
+      - name: the compose stack is well-formed
+        run: |
+          # PRODUCT is REQUIRED (`:?`), so this also proves the stack refuses
+          # to come up pointed at nothing.
+          mkdir -p /tmp/prod/dags
+          printf '[project]\nname = "p"\nversion = "0"\n\n[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n' > /tmp/prod/pyproject.toml
+          set -a; . ./versions.env; set +a
+          PRODUCT=/tmp/prod PRODUCT_NAME=prod SOURCES=/tmp/src \
+            docker compose -f docker-compose.yml -f /tmp/frag.yml config -q
+          echo "compose config is valid"
+          if PRODUCT= PRODUCT_NAME=prod SOURCES=/tmp/src \
+              docker compose -f docker-compose.yml config -q 2>/dev/null; then
+            echo "::error::compose accepted an empty PRODUCT"; exit 1
+          fi
+
+      # The pins are the whole point of this cell: it must run the SAME stack
+      # as the jobs cell, or a difference in their numbers is unattributable.
+      - name: pins match the databricks jobs cell
+        run: |
+          set -a; . ./versions.env; set +a
+          curl -fsSL https://raw.githubusercontent.com/calvinchengx/databricks-platform-jobs/main/versions.env -o /tmp/jobs.env
+          fail=0
+          for var in DATABRICKS_EMULATOR_VERSION SAIL_VERSION SPARK_AGENT_VERSION; do
+            mine=$(eval echo \$$var)
+            theirs=$(grep -E "^$var=" /tmp/jobs.env | cut -d= -f2- || true)
+            if [ -z "$theirs" ]; then
+              echo "::warning::$var is not pinned by databricks-platform-jobs"
+            elif [ "$mine" != "$theirs" ]; then
+              echo "::error::$var is $mine here and $theirs in the jobs cell"
+              fail=1
+            else
+              echo "ok $var=$mine"
+            fi
+          done
+          exit $fail
