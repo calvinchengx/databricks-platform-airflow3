@@ -33,6 +33,19 @@ services:
 
   uc:
     image: unitycatalog/unitycatalog:${UC_VERSION:?see versions.env}
+    # A CAPPED HEAP AND A CAPPED CONTAINER. Unity Catalog is a JVM, and a JVM
+    # with no -Xmx sizes its heap from what it believes the machine has -- here
+    # 15.66 GiB, most of which belongs to other stacks. Under `register`, which
+    # creates eight external tables in quick succession, it aborted with SIGABRT
+    # (exit 134) and a corretto crash log, twice, at the same point.
+    #
+    # That failure arrives three layers away from its cause: Sail reports
+    # `error sending request` to UC, the task reports eight tables FAILED, and
+    # nothing anywhere says a JVM died. The Jobs cell does not hit it because it
+    # is usually the only stack running.
+    environment:
+      _JAVA_OPTIONS: "-Xmx1g -XX:MaxMetaspaceSize=256m"
+    mem_limit: 1536m
     ports:
       - "18476:8080"
     healthcheck:
@@ -85,10 +98,19 @@ services:
       - ${DATABRICKS_DATA:-./data}:/data
       - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
     environment:
-      DATABRICKS_ADDR: "0.0.0.0:8447"
+      # THE JOBS PLATFORM'S ENVIRONMENT, VARIABLE FOR VARIABLE. What was here
+      # before was invented from the names the emulator's flags suggested --
+      # DATABRICKS_ADDR, DATABRICKS_SPARK_AGENT_URL, a UC url carrying the API
+      # path -- and the emulator ignored all three, kept TLS on, and answered
+      # the worker's first request with "Client sent an HTTP request to an
+      # HTTPS server". Guessing an interface that a working example already
+      # spells out is how a cell built to isolate ONE variable acquires four.
+      DATABRICKS_DISABLE_TLS: "1"
       DATABRICKS_DATA_DIR: /data
-      DATABRICKS_SPARK_AGENT_URL: "http://spark-agent:8099"
-      DATABRICKS_UC_URL: "http://uc:8080/api/2.1/unity-catalog"
+      DATABRICKS_PUBLIC_URL: http://127.0.0.1:18475
+      DATABRICKS_SPARK_CONNECT_URL: http://spark-agent:8099
+      DATABRICKS_SPARK_CONNECT_GRPC_URL: http://sail:50051
+      DATABRICKS_UC_URL: http://uc:8080
     healthcheck:
       test: ["CMD", "databricks-emulator", "healthcheck"]
       interval: 5s
@@ -135,13 +157,65 @@ services:
       DATABRICKS_UC_URL: "http://uc:8080"
       DATABRICKS_TARGET: emulator
       CONTOSO_DELTA: /data/delta
+      # WHERE THE PLATFORM PUT THE PRODUCT. The product asks rather than deriving
+      # it from its own __file__: installed into site-packages, that derivation
+      # pointed at `/home/airflow/.local/lib/python3.13/data/admin.pat`. Knowing
+      # the mount point is the PLATFORM's job -- it is the one that mounted it.
+      CONTOSO_PRODUCT_DIR: /opt/product
+      # The credential this platform copies out of the emulator (`make token`).
+      # Named rather than guessed, for the same reason.
+      DATABRICKS_TOKEN_FILE: /opt/product/data/admin.pat
+      # NOT under /opt/product, which is mounted read-only. Anything the client
+      # library caches belongs somewhere writable that no product owns.
+      DATABRICKS_DATA_DIR: /tmp/databricks-data
+      # ONE FILE, SHARED BY EVERY TASK. Under an orchestrator tasks do not share
+      # a working directory, so a run's own facts -- the warehouse id, the
+      # landing date partition -- need a place all of them can see. On the delta
+      # volume because that is the one every task already has.
+      CONTOSO_STATE: /data/delta/state.json
+      # The run's published numbers, on the shared volume rather than in a
+      # task's working directory -- which under an orchestrator is nobody's.
+      CONTOSO_SNAPSHOT: /data/delta/product_snapshot.json
+      # ONE dbt VIRTUALENV, BUILT ONCE AND REUSED. Left unset, cosmos builds a
+      # fresh venv per gold task -- nine of them, concurrently, through one uv
+      # cache. That is not merely slow: they raced and one lost, with
+      # `Failed to read from the distribution cache` on python-dateutil, which
+      # surfaces as a dbt model failing for no reason a dbt log can explain.
+      # The same install by hand succeeds every time, which is the tell.
+      COSMOS_DBT_VENV: /tmp/cosmos-dbt-venv
+      # THE VENDORS' OWN PUBLISHED KEYS. seed_secrets puts each vendor's real
+      # key into the workspace secret scope, reading it from the same file the
+      # vendor's own server reads -- never a literal, because a hand-written
+      # credential here was wrong once and failed as an authentication error
+      # against the vendor rather than as a typo in the product.
+      SOURCES: /opt/sources
+      # THE VENDORS, BY SERVICE NAME. The product's defaults are the Jobs
+      # platform's PUBLISHED ports on localhost, which is right for a job
+      # running on the operator's host and wrong for a task inside this network
+      # -- `Connection refused` to localhost:18190, which reads like a dead
+      # vendor rather than the wrong address. Every one is an env var precisely
+      # so the platform can say where, and these are the names the generated
+      # vendor fragment creates.
+      POS_API_URL: "http://contoso-pos:8090"
+      WEB_API_URL: "http://contoso-web:8091"
+      REFERENCE_API_URL: "http://contoso-reference:8092"
+      ERP_HOST: contoso-erp-db
+      ERP_PORT: "5432"
+      REDPANDA_BOOTSTRAP: "contoso-erp-broker:9092"
     ports:
       - "${AIRFLOW_PORT:-18082}:8080"
     volumes:
       - ${PRODUCT:?set PRODUCT to a data product repo, or run via make up}:/opt/product:ro
+      # Read-only: the worker reads the vendors' published keys and writes
+      # nothing here. The vendor containers mount the same tree.
+      - ${SOURCES:?set SOURCES to a contoso-sources checkout, or run via make up}:/opt/sources:ro
       - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
       - ${DATABRICKS_DATA:-./data}:/emu-data
-    command: bash -c "airflow db migrate && exec airflow standalone"
+      # See scripts/localhost_bridge.py: databricks-connect skips TLS only for
+      # the literal name `localhost`, so the platform makes the target reachable
+      # there rather than asking the product to know the network topology.
+      - ./scripts/localhost_bridge.py:/opt/platform/localhost_bridge.py:ro
+    command: bash -c "python3 /opt/platform/localhost_bridge.py & airflow db migrate && exec airflow standalone"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v2/version', timeout=3)"]
       interval: 10s

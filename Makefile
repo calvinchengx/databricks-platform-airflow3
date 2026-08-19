@@ -6,7 +6,12 @@
 SHELL := /bin/bash
 PRODUCT ?= ./product
 SOURCES ?= ../contoso-sources
-PROJECT ?= airflow-fabric
+# NAMED FOR THIS CELL, not for the platform this Makefile was copied from. It
+# arrived here as `airflow-fabric`, which would have been the Fabric Airflow 3
+# platform's project name too -- two stacks sharing one project name do not
+# collide loudly, they ADOPT each other's containers, and `make down` in one
+# repository stops the other's.
+PROJECT ?= airflow-databricks
 export PRODUCT_ABS := $(abspath $(PRODUCT))
 export SOURCES_ABS := $(abspath $(SOURCES))
 export PRODUCT_NAME := $(notdir $(PRODUCT_ABS))
@@ -19,7 +24,7 @@ PASSWORD_FILE := /opt/airflow/simple_auth_manager_passwords.json.generated
 COMPOSE := PRODUCT=$(PRODUCT_ABS) PRODUCT_NAME=$(PRODUCT_NAME) SOURCES=$(SOURCES_ABS) PWD=$(CURDIR) \
            docker compose -p $(PROJECT) -f docker-compose.yml -f $(FRAGMENT)
 
-.PHONY: help up down logs connections creds doctor sources trigger prepare
+.PHONY: help up down logs connections creds doctor sources trigger prepare token
 help: ## This list
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t20
 
@@ -27,7 +32,28 @@ up: doctor sources prepare ## Build the worker from the product's pyproject.toml
 	@echo "platform: product = $(PRODUCT_ABS)"
 	@echo "platform: sources = $(SOURCES_ABS)"
 	$(COMPOSE) up --build -d
-	@echo "platform: Airflow on http://localhost:$${AIRFLOW_PORT:-18080}"
+	@$(MAKE) --no-print-directory token
+	@echo "platform: Airflow on http://localhost:$${AIRFLOW_PORT:-18082}"
+
+token: ## Put the workspace credential where the product can read it
+# A PRODUCT DOES NOT REACH INTO A PLATFORM -- it is handed a credential. The
+# emulator mints a workspace PAT at start-up; this copies it into the product
+# directory, which is the only place a task can read it from without knowing
+# what started the workspace.
+#
+# AFTER `up`, not before: the file does not exist until the databricks container
+# is healthy. Run as part of `up` for that reason, and separately available for
+# a stack that was already running.
+#
+# On a real workspace there is nothing to copy -- DATABRICKS_TOKEN is exported
+# and the product never looks for this file.
+	@mkdir -p "$(PRODUCT_ABS)/data"
+	@$(COMPOSE) cp databricks:/data/admin.pat "$(PRODUCT_ABS)/data/admin.pat" >/dev/null
+	@test -s "$(PRODUCT_ABS)/data/admin.pat" || { \
+	  echo "the emulator produced no workspace token -- every task would fail"; \
+	  echo "authenticating, which reads as a broken product rather than a"; \
+	  echo "missing credential"; exit 1; }
+	@echo "platform: workspace token -> $(PRODUCT_NAME)/data/admin.pat"
 
 prepare: ## Run the product's own pre-start step, if it declares one
 # THE PLATFORM DOES NOT KNOW WHAT PREPARING MEANS. It asks the product whether
@@ -85,7 +111,7 @@ creds: ## The Airflow admin login for this stack
 	@$(COMPOSE) exec -T airflow test -f $(PASSWORD_FILE) 2>/dev/null || { \
 	  echo "no generated password at $(PASSWORD_FILE)."; \
 	  echo "is the stack up? try: make up"; exit 1; }
-	@echo "url:      http://localhost:$${AIRFLOW_PORT:-18080}"
+	@echo "url:      http://localhost:$${AIRFLOW_PORT:-18082}"
 	@$(COMPOSE) exec -T airflow python3 -c "import json;d=json.load(open('$(PASSWORD_FILE)'));[print(f'user:     {u}\npassword: {p}') for u, p in d.items()]"
 
 doctor: ## Refuse to start against a product that cannot work

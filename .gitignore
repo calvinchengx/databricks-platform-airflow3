@@ -4,3 +4,5 @@ __pycache__/
 # The product this platform is pointed at -- a mount point, never content.
 product
 data/
+# Written from contoso-sources at `make up` -- generated, never edited.
+.sources.generated.yml
