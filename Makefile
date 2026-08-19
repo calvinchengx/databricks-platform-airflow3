@@ -24,7 +24,7 @@ PASSWORD_FILE := /opt/airflow/simple_auth_manager_passwords.json.generated
 COMPOSE := PRODUCT=$(PRODUCT_ABS) PRODUCT_NAME=$(PRODUCT_NAME) SOURCES=$(SOURCES_ABS) PWD=$(CURDIR) \
            docker compose -p $(PROJECT) -f docker-compose.yml -f $(FRAGMENT)
 
-.PHONY: help up down logs connections creds doctor sources trigger prepare token
+.PHONY: help up down logs connections creds doctor sources trigger unpause prepare token verify
 help: ## This list
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t20
 
@@ -83,8 +83,73 @@ sources: ## Generate the compose fragment for the vendors a sources repo declare
 	@python3 scripts/sources.py "$(SOURCES_ABS)/sources.yaml" "$(SOURCES_ABS)" > $(FRAGMENT)
 	@echo "platform: $$(python3 -c "import json;print(len(json.load(open('$(FRAGMENT)'))['services']))") vendor(s) declared"
 
-trigger: ## Trigger a DAG and wait:  make trigger DAG=contoso_daily
+trigger: ## Trigger a DAG and return immediately:  make trigger DAG=contoso_daily
 	$(COMPOSE) exec -T airflow airflow dags trigger $(DAG)
+
+unpause: ## Let a DAG be scheduled:  make unpause DAG=contoso_daily
+# ITS OWN TARGET so `verify` can point at one short command instead of printing
+# the whole expanded compose invocation, and so that letting a DAG schedule
+# itself stays a thing someone chose to do.
+	@test -n "$(DAG)" || { echo "usage: make unpause DAG=<dag_id>"; exit 2; }
+	$(COMPOSE) exec -T airflow airflow dags unpause $(DAG)
+
+# How long `verify` waits for a run, and how often it looks.
+VERIFY_TIMEOUT ?= 3600
+VERIFY_POLL ?= 15
+
+verify: ## Run a DAG and FAIL if it fails:  make verify DAG=contoso_daily
+# WHAT `trigger` ONLY LOOKED LIKE IT DID. Its help said "and wait" and it
+# returned the moment the run was queued, so NOTHING IN THIS REPOSITORY EVER
+# EXITED NON-ZERO BECAUSE A PIPELINE FAILED. Every green this platform reported
+# rested on a person reading run state by hand afterwards. DoD 3 asks for green
+# THROUGH the orchestrator; a command that cannot go red does not establish it.
+#
+# IT WATCHES ITS OWN RUN, by an explicit --run-id. A scheduled run of the same
+# DAG can be in flight at the same moment -- that happened while this platform
+# was being witnessed -- and "the most recent run" would then be the other one,
+# reporting a verdict for a pipeline this command did not start.
+#
+# IT DOES NOT UNPAUSE, deliberately. Unpausing changes the DAG's schedule and
+# starts a catch-up run ALONGSIDE this one: two runs writing the same tables,
+# which is how a witness stops being one. Refusing with the command printed is
+# the smaller surprise.
+	@test -n "$(DAG)" || { echo "usage: make verify DAG=<dag_id>"; exit 2; }
+	@paused=$$($(COMPOSE) exec -T airflow airflow dags list -o plain 2>/dev/null \
+	    | awk -v d="$(DAG)" '$$1 == d {print $$4}'); \
+	  test -n "$$paused" || { \
+	    echo "no DAG called $(DAG) -- is the stack up, and has it parsed yet?"; \
+	    exit 1; }; \
+	  test "$$paused" = "False" || { \
+	    echo "$(DAG) is paused, so a triggered run would sit queued forever."; \
+	    echo "unpause it deliberately -- it starts a catch-up run as well:"; \
+	    echo "  make unpause DAG=$(DAG)"; \
+	    exit 1; }; \
+	  run="verify__$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	  echo "platform: $(DAG) -> $$run"; \
+	  $(COMPOSE) exec -T airflow airflow dags trigger $(DAG) --run-id "$$run" >/dev/null; \
+	  waited=0; \
+	  while :; do \
+	    state=$$($(COMPOSE) exec -T airflow airflow dags list-runs $(DAG) -o plain 2>/dev/null \
+	      | awk -v r="$$run" '$$2 == r {print $$3}'); \
+	    case "$$state" in \
+	      success) echo "platform: $$run SUCCEEDED"; exit 0;; \
+	      failed) break;; \
+	    esac; \
+	    test $$waited -lt $(VERIFY_TIMEOUT) || { \
+	      echo "platform: $$run is still $${state:-unqueued} after $(VERIFY_TIMEOUT)s."; \
+	      echo "giving up WITHOUT a verdict -- this is not a pass:  make logs"; \
+	      exit 1; }; \
+	    sleep $(VERIFY_POLL); waited=$$((waited + $(VERIFY_POLL))); \
+	  done; \
+	  echo "platform: $$run FAILED."; \
+	  echo "the ones that FAILED are the cause; the rest were blocked behind them:"; \
+	  $(COMPOSE) exec -T postgres psql -U airflow -d airflow -t -A -c \
+	    "select case when state = 'failed' then '  FAILED   ' else '  blocked  ' end \
+	            || task_id from task_instance \
+	     where dag_id='$(DAG)' and run_id='$$run' and coalesce(state,'x') <> 'success' \
+	     order by (state = 'failed') desc, task_id;" 2>/dev/null || true; \
+	  echo "logs:  make logs"; \
+	  exit 1
 
 down: ## Stop and remove everything, volumes included
 	$(COMPOSE) down -v
