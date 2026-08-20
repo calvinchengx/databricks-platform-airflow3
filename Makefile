@@ -149,6 +149,16 @@ verify: ## Run a DAG and FAIL if it fails:  make verify DAG=contoso_daily
 	    echo "unpause it deliberately -- it starts a catch-up run as well:"; \
 	    echo "  make unpause DAG=$(DAG)"; \
 	    exit 1; }; \
+	  busy=$$($(COMPOSE) exec -T airflow airflow dags list-runs $(DAG) -o plain 2>/dev/null \
+	    | awk '$$3 == "running" || $$3 == "queued" {print $$2}' | head -3); \
+	  test -z "$$busy" || { \
+	    echo "$(DAG) already has a run in flight, and max_active_runs is 1:"; \
+	    for r in $$busy; do echo "  $$r"; done; \
+	    echo "a trigger now would sit QUEUED behind it, and this command would"; \
+	    echo "report 'still unqueued' after $(VERIFY_TIMEOUT)s having named nothing."; \
+	    echo "two runs writing one catalog is also not a witness. wait for it, or:"; \
+	    echo "  make kill-runs DAG=$(DAG)"; \
+	    exit 1; }; \
 	  run="verify__$$(date -u +%Y%m%dT%H%M%SZ)"; \
 	  echo "platform: $(DAG) -> $$run"; \
 	  $(COMPOSE) exec -T airflow airflow dags trigger $(DAG) --run-id "$$run" >/dev/null; \
@@ -175,6 +185,24 @@ verify: ## Run a DAG and FAIL if it fails:  make verify DAG=contoso_daily
 	     order by (state = 'failed') desc, task_id;" 2>/dev/null || true; \
 	  echo "logs:  make logs"; \
 	  exit 1
+
+kill-runs: ## Mark every in-flight run of a DAG failed:  make kill-runs DAG=contoso_daily
+# THE ESCAPE HATCH `verify` POINTS AT. A fresh stack starts a CATCH-UP run of
+# its own the moment the metadata database is created -- nobody unpaused
+# anything -- and with max_active_runs 1 that run owns the only slot. Every
+# later trigger queues behind it, which is what "still unqueued after 3600s"
+# actually meant, three times in one evening.
+#
+# Deliberately not `dags backfill --reset-dagruns` or a pause: this only ends
+# runs that are already in flight, so a witness starts from a quiet DAG
+# without changing the schedule that produced them.
+	@test -n "$(DAG)" || { echo "usage: make kill-runs DAG=<dag_id>"; exit 2; }
+	@$(COMPOSE) exec -T postgres psql -U airflow -d airflow -q -c \
+	  "update task_instance set state='failed' \
+	    where dag_id='$(DAG)' and state in ('running','queued','scheduled','deferred'); \
+	   update dag_run set state='failed', end_date=now() \
+	    where dag_id='$(DAG)' and state in ('running','queued');" >/dev/null
+	@echo "platform: in-flight runs of $(DAG) ended"
 
 down: ## Stop and remove everything, volumes included
 	$(COMPOSE) down -v
