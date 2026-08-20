@@ -20,14 +20,53 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  # THE PORTABLE HALF, on all three. Everything here is uv, make and Python
+  # reading files -- no Docker, no apt, no GNU-only flags -- so there is no
+  # reason for it to run on one operating system and every reason for a
+  # contributor on a Mac or a Windows box to find out here rather than later.
+  test:
+    name: Repo tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.12.3"
+      # The Windows runner ships no make, and `make test`/`make lint` are how
+      # these are invoked -- here and by anyone developing on it.
+      - if: matrix.os == 'windows-latest'
+        run: choco install make --no-progress -y
+        working-directory: ${{ github.workspace }}
+      - run: uv sync --frozen --group dev
+      - run: make test
+      - run: make lint
+      # ruff was not configured or run at all before this, so nothing described
+      # the intention, let alone guaranteed it.
+      - name: ruff
+        run: uvx ruff@0.15.22 check .
+      # PARSING IS PORTABLE, shellcheck is not. `bash -n` runs on all three
+      # (given LF endings, which .gitattributes pins); the shellcheck pass
+      # needs apt and stays in the ubuntu job below.
+      - name: start.sh parses
+        run: bash -n scripts/start.sh
+
+  # THE LINUX-ONLY HALF: apt, `sed -i`, Docker and curl. Splitting these out is
+  # what lets the checks above run everywhere -- not a downgrade of these.
+  stack:
+    name: Stack and generator (ubuntu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: start.sh is valid shell
+      - name: start.sh passes shellcheck
         run: |
-          bash -n scripts/start.sh
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck -S warning scripts/start.sh
 
@@ -78,12 +117,6 @@ jobs:
             echo "::error::compose accepted a missing UC_CATALOG"; exit 1
           fi
 
-      # This cell ships no Python package, so there is no lockfile to install
-      # from. pytest is pulled in for the boundary tests alone.
-      - name: repo boundary tests
-        run: |
-          python3 -m pip install --quiet pytest
-          python3 -m pytest tests -q
 
       # The pins are the whole point of this cell: it must run the SAME stack
       # as the jobs cell, or a difference in their numbers is unattributable.

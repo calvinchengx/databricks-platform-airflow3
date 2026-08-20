@@ -24,7 +24,7 @@ PASSWORD_FILE := /opt/airflow/simple_auth_manager_passwords.json.generated
 COMPOSE := PRODUCT=$(PRODUCT_ABS) PRODUCT_NAME=$(PRODUCT_NAME) SOURCES=$(SOURCES_ABS) PWD=$(CURDIR) \
            docker compose -p $(PROJECT) -f docker-compose.yml -f $(FRAGMENT)
 
-.PHONY: help up down logs connections creds doctor sources trigger unpause prepare token verify
+.PHONY: help up down logs connections creds doctor sources trigger unpause prepare token verify test lint
 help: ## This list
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t20
 
@@ -244,3 +244,12 @@ doctor: ## Refuse to start against a product that cannot work
 	  echo "  would be missing from the worker and every DAG importing them would"; \
 	  echo "  fail at run time with ModuleNotFoundError."; exit 1; }
 	@echo "platform: $(PRODUCT_NAME) provides pyproject.toml and dags/"
+
+test: ## Repo-boundary tests (no Docker)
+	uv run --frozen --group dev python -m pytest tests -q
+
+lint: ## Lint this repository's own scripts and tests
+# The PRODUCT's code is linted in the product repository. What is left here is
+# the platform: scripts/ and tests/, neither of which imports anything
+# third-party.
+	uv run --frozen --group dev python -m ruff check .

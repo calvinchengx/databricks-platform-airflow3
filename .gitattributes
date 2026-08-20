@@ -1,0 +1,9 @@
+# LF everywhere. A CRLF checkout on Windows breaks shell scripts the moment
+# they are mounted into a Linux container, and the failure reads as "the
+# container is broken" rather than "your checkout has \r line endings".
+# `bash -n scripts/start.sh` is a CI step here, and against a CRLF copy it
+# reports `syntax error near unexpected token` -- so without this the Windows
+# leg of the matrix cannot be green.
+* text=auto eol=lf
+*.png binary
+*.whl binary

@@ -100,7 +100,7 @@ def fragment(decl: dict, sources_dir: str, pins: dict) -> dict:
             services[broker] = {
                 "image": f"docker.redpanda.com/redpandadata/redpanda:{pins['REDPANDA_VERSION']}",
                 "command": ["redpanda", "start", "--mode=dev-container", "--smp=1",
-                            f"--kafka-addr=INTERNAL://0.0.0.0:9092",
+                            "--kafka-addr=INTERNAL://0.0.0.0:9092",
                             f"--advertise-kafka-addr=INTERNAL://{broker}:9092"],
                 "healthcheck": {"test": ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"],
                                 "interval": "5s", "timeout": "5s", "retries": 30},
