@@ -1,19 +1,41 @@
 #!/usr/bin/env python3
-"""Point versions.env at a fabric-emulator release, digests and all.
+"""Point versions.env at a release. TWO cadences, because this cell has two.
 
-WHY A SCRIPT. Every fabric-emulator release rebuilds and overwrites the tags it
-publishes, so three pins move at once and a tag alone names a moving target.
-Bumping the emulator by hand and forgetting the compute is the failure this
-prevents: the stack then runs a new emulator against the previous release's
-Sail and statement agent, which is a combination nobody tested.
+WHAT WAS HERE BEFORE. A copy of fabric-platform-airflow3's script, which pins a
+`fabric-emulator` release and three DIGESTS. This repository runs no fabric
+emulator and pins by TAG, so that script could not work with any argument:
 
-Measured on v0.29.0: all three digests moved while two of the three tags stayed
-exactly where they were (`emulator-sail:0.7.0`, `emulator-spark-agent:4.2.0`).
+    $ python3 scripts/set_release.py 0.2.7
+    cannot read digest for ghcr.io/calvinchengx/fabric-emulator:0.2.7: not found
 
-Usage:  python3 scripts/set_release.py 0.29.0
+It would have failed on the fabric lookup, and then again on `SAIL_ENGINE_VERSION`
+and `SPARK_CLIENT_VERSION`, which do not exist here. A release tool that cannot
+run is worse than no tool: it looks like the bump is covered. This repository
+drifted twice while it sat there — to 0.2.5 against a family on 0.2.6, and to
+0.30.0 compute against a family on 0.32.0, the release that stopped the
+statement agent sharing `sys.argv` between concurrent tasks.
+
+THE TWO CADENCES. `DATABRICKS_EMULATOR_VERSION` moves with a databricks-emulator
+release. `SAIL_VERSION` and `SPARK_AGENT_VERSION` do not: Sail and the statement
+agent are built and published by **fabric-emulator**, tagged with ITS release
+number, so they move when fabric releases. Bumping one and forgetting the other
+is what leaves a new workspace binary running last month's compute, which is the
+drift this script exists to prevent — so each cadence is a separate, explicit
+invocation rather than a guess.
+
+    python3 scripts/set_release.py --databricks 0.2.7
+    python3 scripts/set_release.py --fabric 0.32.0
+
+THE TAGS ARE CHECKED. Both cadences publish tags that are REBUILT rather than
+moved, so a tag naming nothing is a live possibility and a pin to it fails only
+later, in CI, as a pull error. The registry is asked whether the tag resolves
+before anything is written. `--no-verify` skips that for offline use, and says
+so loudly.
 """
+
 from __future__ import annotations
 
+import argparse
 import pathlib
 import re
 import subprocess
@@ -21,53 +43,96 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "versions.env"
+SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?$")
 
-# var-prefix -> (image, which version var supplies its tag)
-PINS = {
-    "FABRIC_EMULATOR": ("ghcr.io/calvinchengx/fabric-emulator", "release"),
-    "SAIL_ENGINE": ("ghcr.io/calvinchengx/emulator-sail", "SAIL_ENGINE_VERSION"),
-    "SPARK_CLIENT": ("ghcr.io/calvinchengx/emulator-spark-agent", "SPARK_CLIENT_VERSION"),
+# cadence -> {variable: image that must carry the tag}
+CADENCES = {
+    "databricks": {
+        "DATABRICKS_EMULATOR_VERSION": "ghcr.io/calvinchengx/databricks-emulator",
+    },
+    "fabric": {
+        "SAIL_VERSION": "ghcr.io/calvinchengx/emulator-sail",
+        "SPARK_AGENT_VERSION": "ghcr.io/calvinchengx/emulator-spark-agent",
+    },
 }
 
 
-def digest_of(image: str, tag: str) -> str:
-    """Ask the registry what this tag points at RIGHT NOW."""
+def tag_exists(image: str, tag: str) -> tuple[bool, str]:
+    """Ask the registry whether image:tag resolves RIGHT NOW."""
     out = subprocess.run(
         ["docker", "buildx", "imagetools", "inspect", f"{image}:{tag}",
          "--format", "{{.Manifest.Digest}}"],
-        capture_output=True, text=True)
-    if out.returncode != 0 or not out.stdout.strip().startswith("sha256:"):
-        raise SystemExit(f"cannot read digest for {image}:{tag}: "
-                         f"{(out.stderr or out.stdout).strip()[:200]}")
-    return out.stdout.strip()
+        capture_output=True, text=True,
+    )
+    if out.returncode == 0 and out.stdout.strip().startswith("sha256:"):
+        return True, out.stdout.strip()
+    return False, (out.stderr or out.stdout).strip().splitlines()[-1:][0] if (out.stderr or out.stdout).strip() else "no such tag"
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: set_release.py <emulator-version>   e.g. 0.29.0")
-    release = sys.argv[1].lstrip("v")
-    text = VERSIONS.read_text()
+def set_vars(text: str, updates: dict[str, str]) -> tuple[str, dict[str, str]]:
+    """Rewrite only the named assignments, leaving comments and layout alone."""
+    moved: dict[str, str] = {}
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, old = stripped.partition("=")
+        key, old = key.strip(), old.strip()
+        if key in updates:
+            moved[key] = old
+            lines[i] = f"{key}={updates[key]}\n"
+    return "".join(lines), moved
 
-    def current(var: str) -> str:
-        m = re.search(rf"^{var}=(.+)$", text, re.M)
-        if not m:
-            raise SystemExit(f"{var} not found in versions.env")
-        return m.group(1).strip()
 
-    for prefix, (image, tag_source) in PINS.items():
-        tag = release if tag_source == "release" else current(tag_source)
-        digest = digest_of(image, tag)
-        before = current(f"{prefix}_DIGEST")
-        text = re.sub(rf"^{prefix}_DIGEST=.*$", f"{prefix}_DIGEST={digest}", text, flags=re.M)
-        moved = "moved" if before != digest else "unchanged"
-        print(f"{image}:{tag}\n  {before[:19]}… -> {digest[:19]}…  ({moved})")
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--databricks", metavar="VERSION",
+                       help="a databricks-emulator release, e.g. 0.2.7")
+    group.add_argument("--fabric", metavar="VERSION",
+                       help="a fabric-emulator release: moves Sail and the spark agent")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip the registry check (offline); the pin is then unproven")
+    args = ap.parse_args(argv)
 
-    text = re.sub(r"^FABRIC_EMULATOR_VERSION=.*$",
-                  f"FABRIC_EMULATOR_VERSION={release}", text, flags=re.M)
-    VERSIONS.write_text(text)
-    print(f"\nversions.env now pins fabric-emulator {release}")
+    cadence = "databricks" if args.databricks else "fabric"
+    version = (args.databricks or args.fabric).lstrip("v")
+    if not SEMVER.match(version):
+        sys.exit(f"not a version: {version!r} — expected something like 0.2.7")
+
+    wanted = CADENCES[cadence]
+
+    if args.no_verify:
+        print("  !! --no-verify: the tags below were NOT checked against the registry")
+    else:
+        for var, image in wanted.items():
+            ok, detail = tag_exists(image, version)
+            if not ok:
+                sys.exit(f"{image}:{version} does not resolve ({detail}).\n"
+                         f"Nothing was written. Check the release published its images "
+                         f"before pinning to it.")
+            print(f"  {image}:{version} -> {detail[:19]}…")
+
+    text = VERSIONS.read_text(encoding="utf-8")
+    new, moved = set_vars(text, {v: version for v in wanted})
+    missing = [v for v in wanted if v not in moved]
+    if missing:
+        sys.exit(f"{VERSIONS.name} has no {', '.join(missing)} to set — this script "
+                 f"and the file have drifted apart.")
+    VERSIONS.write_text(new, encoding="utf-8")
+    for var, old in moved.items():
+        note = "  (unchanged)" if old == version else ""
+        print(f"  {var}: {old} -> {version}{note}")
+
+    if cadence == "databricks":
+        print("  Sail and the spark agent are NOT moved: they ship on fabric's "
+              "cadence. Use --fabric for those.")
+    else:
+        print("  DATABRICKS_EMULATOR_VERSION is NOT moved: it ships on the "
+              "databricks-emulator cadence. Use --databricks for that.")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
