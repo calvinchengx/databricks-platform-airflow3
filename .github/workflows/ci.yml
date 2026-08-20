@@ -64,13 +64,22 @@ jobs:
           mkdir -p /tmp/prod/dags
           printf '[project]\nname = "p"\nversion = "0"\n\n[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n' > /tmp/prod/pyproject.toml
           set -a; . ./versions.env; set +a
-          PRODUCT=/tmp/prod PRODUCT_NAME=prod SOURCES=/tmp/src \
+          PRODUCT=/tmp/prod PRODUCT_NAME=prod SOURCES=/tmp/src UC_CATALOG=probe \
             docker compose -f docker-compose.yml -f /tmp/frag.yml config -q
           echo "compose config is valid"
-          if PRODUCT= PRODUCT_NAME=prod SOURCES=/tmp/src \
+          if PRODUCT= PRODUCT_NAME=prod SOURCES=/tmp/src UC_CATALOG=probe \
               docker compose -f docker-compose.yml config -q 2>/dev/null; then
             echo "::error::compose accepted an empty PRODUCT"; exit 1
           fi
+          # The catalog belongs to the product, so the stack must refuse to
+          # come up without being told which one -- same contract as PRODUCT.
+          if PRODUCT=/tmp/prod PRODUCT_NAME=prod SOURCES=/tmp/src \
+              docker compose -f docker-compose.yml config -q 2>/dev/null; then
+            echo "::error::compose accepted a missing UC_CATALOG"; exit 1
+          fi
+
+      - name: repo boundary tests
+        run: python3 -m pytest tests -q
 
       # The pins are the whole point of this cell: it must run the SAME stack
       # as the jobs cell, or a difference in their numbers is unattributable.

@@ -2,8 +2,8 @@
 
 THE PLATFORM OWNS THE MECHANISM, THE DECLARATION OWNS THE CONTENT — the same
 split as the DAG bundle. This file knows how to run an OpenAPI simulator and a
-CDC stack; it does not know that Contoso exists, how many vendors there are, or
-what any of them serve. Point it at a different `sources.yaml` and it stands up
+CDC stack; it does not know WHICH vendors exist, how many there are, or what
+any of them serve. Point it at a different `sources.yaml` and it stands up
 those vendors instead.
 
 That is not tidiness. In production none of this runs at all: the vendors are
@@ -88,12 +88,12 @@ def fragment(decl: dict, sources_dir: str, pins: dict) -> dict:
                 # for a decoder to read and the connector attaches to silence.
                 "command": ["postgres", "-c", "wal_level=logical",
                             "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"],
-                "environment": {"POSTGRES_USER": v.get("db_user", "contoso"),
-                                "POSTGRES_PASSWORD": v.get("db_password", "contoso-erp-dev"),
+                "environment": {"POSTGRES_USER": v.get("db_user", "vendor"),
+                                "POSTGRES_PASSWORD": v.get("db_password", "vendor-dev"),
                                 "POSTGRES_DB": v.get("db_name", "erp")},
                 "healthcheck": {
                     "test": ["CMD-SHELL",
-                             f"pg_isready -U {v.get('db_user','contoso')} -d {v.get('db_name','erp')}"],
+                             f"pg_isready -U {v.get('db_user','vendor')} -d {v.get('db_name','erp')}"],
                     "interval": "5s", "timeout": "3s", "retries": 20},
                 "volumes": [f"{sources_dir}:/sources:ro"],
             }
@@ -112,8 +112,8 @@ def fragment(decl: dict, sources_dir: str, pins: dict) -> dict:
                                    connect: {"condition": "service_healthy"}},
                     "environment": {
                         "ERP_DSN": (f"host={db} port=5432 dbname={v.get('db_name','erp')} "
-                                    f"user={v.get('db_user','contoso')} "
-                                    f"password={v.get('db_password','contoso-erp-dev')}"),
+                                    f"user={v.get('db_user','vendor')} "
+                                    f"password={v.get('db_password','vendor-dev')}"),
                         "ERP_CONNECT_URL": f"http://{connect}:8083",
                         "ERP_DB_HOST": db,
                         "PYTHONUNBUFFERED": "1",
