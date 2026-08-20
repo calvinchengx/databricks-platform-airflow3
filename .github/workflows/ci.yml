@@ -78,8 +78,12 @@ jobs:
             echo "::error::compose accepted a missing UC_CATALOG"; exit 1
           fi
 
+      # This cell ships no Python package, so there is no lockfile to install
+      # from. pytest is pulled in for the boundary tests alone.
       - name: repo boundary tests
-        run: python3 -m pytest tests -q
+        run: |
+          python3 -m pip install --quiet pytest
+          python3 -m pytest tests -q
 
       # The pins are the whole point of this cell: it must run the SAME stack
       # as the jobs cell, or a difference in their numbers is unattributable.
