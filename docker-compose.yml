@@ -60,13 +60,17 @@ services:
     depends_on:
       uc: {condition: service_healthy}
     volumes:
-      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+      - ${DELTA_DATA:-/tmp/dbx-airflow-delta}:/data/delta
     environment:
       SAIL_SPARK__SESSION_TIMEOUT_SECS: "3600"
       RUST_LOG: "info"
       UNITY_ALLOW_HTTP_URL: "true"
       SAIL_CATALOG__DEFAULT_CATALOG: sail
-      SAIL_CATALOG__LIST: '[{name="sail", type="memory", initial_database=["default"]}, {type="unity", name="contoso", uri="http://uc:8080/api/2.1/unity-catalog", default_catalog="contoso"}]'
+      # UC_CATALOG is REQUIRED, like PRODUCT and SOURCES. The catalog belongs
+      # to whichever product is mounted -- it creates the catalog and
+      # materialises gold into it -- so this platform cannot know the name.
+      # A default here would hand a second product the first one's catalog.
+      SAIL_CATALOG__LIST: '[{name="sail", type="memory", initial_database=["default"]}, {type="unity", name="${UC_CATALOG:?set UC_CATALOG to the catalog your product uses}", uri="http://uc:8080/api/2.1/unity-catalog", default_catalog="${UC_CATALOG:?set UC_CATALOG to the catalog your product uses}"}]'
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()"]
       interval: 3s
@@ -78,7 +82,7 @@ services:
     depends_on:
       sail: {condition: service_healthy}
     volumes:
-      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+      - ${DELTA_DATA:-/tmp/dbx-airflow-delta}:/data/delta
     environment:
       SPARK_REMOTE: "sc://sail:50051"
     healthcheck:
@@ -96,7 +100,7 @@ services:
       - "18475:8447"
     volumes:
       - ${DATABRICKS_DATA:-./data}:/data
-      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+      - ${DELTA_DATA:-/tmp/dbx-airflow-delta}:/data/delta
     environment:
       # THE JOBS PLATFORM'S ENVIRONMENT, VARIABLE FOR VARIABLE. What was here
       # before was invented from the names the emulator's flags suggested --
@@ -209,7 +213,7 @@ services:
       # Read-only: the worker reads the vendors' published keys and writes
       # nothing here. The vendor containers mount the same tree.
       - ${SOURCES:?set SOURCES to a contoso-sources checkout, or run via make up}:/opt/sources:ro
-      - ${DELTA_DATA:-/tmp/contoso-dbx-airflow-delta}:/data/delta
+      - ${DELTA_DATA:-/tmp/dbx-airflow-delta}:/data/delta
       - ${DATABRICKS_DATA:-./data}:/emu-data
       # See scripts/localhost_bridge.py: databricks-connect skips TLS only for
       # the literal name `localhost`, so the platform makes the target reachable
