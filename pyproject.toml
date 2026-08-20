@@ -1,0 +1,23 @@
+[project]
+# NO PRODUCT NAME HERE. pyproject.toml configures the platform, and a
+# platform that names a product is one a second product cannot reuse --
+# `test_the_platform_holds_no_product` enforces exactly that.
+name = "databricks-platform-airflow3"
+version = "0.1.0"
+description = "Platform: Apache Airflow 3 as the orchestrator over databricks-emulator"
+requires-python = ">=3.12"
+authors = [{name = "Calvin Cheng", email = "calvin@calvinx.com"}]
+# EMPTY, AND THAT IS THE CLAIM. This platform carries no product and no runtime
+# dependency: scripts/ is standard library, and every package the pipeline needs
+# is installed inside the worker from the PRODUCT's own pyproject.toml.
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=9.0.3,<10", "ruff>=0.15,<0.16"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
