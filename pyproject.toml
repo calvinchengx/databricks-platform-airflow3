@@ -1,7 +1,10 @@
 [project]
+# NO PRODUCT NAME HERE. pyproject.toml configures the platform, and a
+# platform that names a product is one a second product cannot reuse --
+# `test_the_platform_holds_no_product` enforces exactly that.
 name = "databricks-platform-airflow3"
 version = "0.1.0"
-description = "Contoso platform: Apache Airflow 3 as the orchestrator over databricks-emulator"
+description = "Platform: Apache Airflow 3 as the orchestrator over databricks-emulator"
 requires-python = ">=3.12"
 authors = [{name = "Calvin Cheng", email = "calvin@calvinx.com"}]
 # EMPTY, AND THAT IS THE CLAIM. This platform carries no product and no runtime
