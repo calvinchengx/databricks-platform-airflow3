@@ -49,7 +49,12 @@ def _config_files() -> list[pathlib.Path]:
     for rel in out:
         if rel.endswith((".md", ".txt")):
             continue
-        if rel.split("/")[0] in {"product", "data"}:
+        # `tests/` is excluded because a checker must NAME what it forbids:
+        # the patterns below contain the very identifier they look for, so
+        # scanning this file makes the guard fail on itself. Found the hard
+        # way -- it passed locally while still untracked, and `git ls-files`
+        # only picked it up once committed.
+        if rel.split("/")[0] in {"product", "data", "tests"}:
             continue
         p = ROOT / rel
         if p.is_file():
