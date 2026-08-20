@@ -96,6 +96,11 @@ unpause: ## Let a DAG be scheduled:  make unpause DAG=contoso_daily
 # How long `verify` waits for a run, and how often it looks.
 VERIFY_TIMEOUT ?= 3600
 VERIFY_POLL ?= 15
+# How long it waits for the DAG to EXIST before saying it does not. A stack
+# that was just brought up has an empty metadata database, and the dag
+# processor's first scan takes tens of seconds; asking sooner is asking early,
+# not asking about a missing DAG.
+VERIFY_PARSE_WAIT ?= 300
 
 verify: ## Run a DAG and FAIL if it fails:  make verify DAG=contoso_daily
 # WHAT `trigger` ONLY LOOKED LIKE IT DID. Its help said "and wait" and it
@@ -114,11 +119,31 @@ verify: ## Run a DAG and FAIL if it fails:  make verify DAG=contoso_daily
 # which is how a witness stops being one. Refusing with the command printed is
 # the smaller surprise.
 	@test -n "$(DAG)" || { echo "usage: make verify DAG=<dag_id>"; exit 2; }
-	@paused=$$($(COMPOSE) exec -T airflow airflow dags list -o plain 2>/dev/null \
-	    | awk -v d="$(DAG)" '$$1 == d {print $$4}'); \
-	  test -n "$$paused" || { \
-	    echo "no DAG called $(DAG) -- is the stack up, and has it parsed yet?"; \
-	    exit 1; }; \
+# IT WAITS FOR THE DAG TO EXIST, and that is not politeness. `make up` recreates
+# the metadata database, so for the first tens of seconds afterwards EVERY DAG
+# is absent -- and this check used to call that "no DAG called X", a hard exit 1
+# that reads as a broken DAG. It cost three witness runs in one evening. The
+# distinction it now makes is the one that matters: an IMPORT ERROR is reported
+# immediately, because waiting cannot fix a traceback; absence alone is retried
+# until VERIFY_PARSE_WAIT, because the scan may simply not have happened.
+	@waited=0; \
+	  while :; do \
+	    paused=$$($(COMPOSE) exec -T airflow airflow dags list -o plain 2>/dev/null \
+	      | awk -v d="$(DAG)" '$$1 == d {print $$4}'); \
+	    test -n "$$paused" && break; \
+	    errs=$$($(COMPOSE) exec -T airflow airflow dags list-import-errors -o plain 2>/dev/null \
+	      | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' \
+	      | grep -v '^No data found' | grep -v '^filepath' | head -5); \
+	    test -z "$$errs" || { \
+	      echo "a DAG file cannot be parsed, so $(DAG) will never appear:"; \
+	      echo "$$errs"; exit 1; }; \
+	    test $$waited -lt $(VERIFY_PARSE_WAIT) || { \
+	      echo "no DAG called $(DAG) after $(VERIFY_PARSE_WAIT)s, and no import"; \
+	      echo "error to explain it -- check the dag bundle is mounted:  make logs"; \
+	      exit 1; }; \
+	    test $$waited -gt 0 || echo "platform: waiting for $(DAG) to be scanned"; \
+	    sleep $(VERIFY_POLL); waited=$$((waited + $(VERIFY_POLL))); \
+	  done; \
 	  test "$$paused" = "False" || { \
 	    echo "$(DAG) is paused, so a triggered run would sit queued forever."; \
 	    echo "unpause it deliberately -- it starts a catch-up run as well:"; \
