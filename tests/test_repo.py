@@ -32,26 +32,40 @@ VENDOR_OK = re.compile(r"contoso-(sources|pos|web|reference|erp-db|erp-broker)")
 # exists to forbid. Delete this exemption with the rename.
 PENDING_RENAME = re.compile(r"CONTOSO_(DELTA|PRODUCT_DIR|STATE|SNAPSHOT)")
 
-# THE ONE PLACE THIS CELL IS ASSEMBLED, and the only place the leaf may be
+# THE ONE PLACE THIS CELL IS ASSEMBLED, and the only place its product may be
 # named. `_config_files`' own docstring draws the line: what must not name a
 # product is anything that CONFIGURES the stack, "because that is what a second
 # product would inherit". A second product inherits the Makefile, the compose
 # and the scripts -- it does not inherit this repository's CI. The acceptance
 # workflow is not the platform being coupled to a product; it is the family
 # verifying THIS cell, which is a platform plus one specific leaf, and it
-# cannot do that without naming the leaf.
+# cannot do that without naming it.
 #
-# Deliberately narrow: the leaf is named, not a pattern, and only under
-# .github/workflows. A workflow naming a DIFFERENT product still fails, and so
-# does the Makefile naming this one -- which is where coupling would actually
-# live. Every sibling platform names its leaf in acceptance.yml; their versions
-# of this test check the Makefile alone and never had to decide.
-# Two names, because verifying this cell needs both: the leaf to check out and
-# the DAG to run. `make verify DAG=<id>` takes the id as a parameter for exactly
-# this reason -- the Makefile does not know it, so the platform stays reusable
-# and only the cell's own verification names it.
-ACCEPTANCE_LEAF = "contoso-data-product-databricks-airflow3"
-ACCEPTANCE_DAG = "contoso_daily"
+# THREE NAMES, each one a fact about the cell that the platform refuses to
+# know, and each one enumerated rather than matched by pattern:
+#
+#   the leaf     -- which product this cell runs, checked out by the workflow
+#   the DAG      -- `make verify DAG=<id>` takes it as a parameter precisely so
+#                   the Makefile does not have to know it
+#   the catalog  -- compose declares `${UC_CATALOG:?}` with NO default, because
+#                   "a default here would hand a second product the first one's
+#                   catalog"; the value therefore belongs to whoever assembles
+#                   the cell
+#
+# The guard stays strong: a DIFFERENT product named in a workflow still fails,
+# and so does the Makefile naming any of these -- which is where coupling would
+# actually live. Verified both ways.
+# The catalog is a BARE word, so it is matched as an assignment rather than
+# stripped as a substring. Listing plain "contoso" here stripped it out of
+# every other identifier too -- `contoso-data-product-fabric-airflow3` became
+# `-data-product-fabric-airflow3` and passed. Caught by the check below that
+# names a DIFFERENT product and expects a failure; without that check this
+# would have shipped as a guard that permits anything.
+ACCEPTANCE_NAMES = (
+    "contoso-data-product-databricks-airflow3",
+    "contoso_daily",
+)
+ACCEPTANCE_CATALOG = re.compile(r"UC_CATALOG\s*[:=]\s*contoso\b")
 ACCEPTANCE_ONLY = ".github/workflows/"
 
 
@@ -113,7 +127,9 @@ def test_the_platform_holds_no_product():
             # Strip the allowed vendor names, then see if any mention survives.
             stripped = PENDING_RENAME.sub("", VENDOR_OK.sub("", code))
             if rel.startswith(ACCEPTANCE_ONLY):
-                stripped = stripped.replace(ACCEPTANCE_LEAF, "").replace(ACCEPTANCE_DAG, "")
+                stripped = ACCEPTANCE_CATALOG.sub("", stripped)
+                for name in ACCEPTANCE_NAMES:
+                    stripped = stripped.replace(name, "")
             if "contoso" in stripped.lower():
                 offenders.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()[:80]}")
     assert not offenders, (
