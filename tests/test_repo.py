@@ -32,6 +32,28 @@ VENDOR_OK = re.compile(r"contoso-(sources|pos|web|reference|erp-db|erp-broker)")
 # exists to forbid. Delete this exemption with the rename.
 PENDING_RENAME = re.compile(r"CONTOSO_(DELTA|PRODUCT_DIR|STATE|SNAPSHOT)")
 
+# THE ONE PLACE THIS CELL IS ASSEMBLED, and the only place the leaf may be
+# named. `_config_files`' own docstring draws the line: what must not name a
+# product is anything that CONFIGURES the stack, "because that is what a second
+# product would inherit". A second product inherits the Makefile, the compose
+# and the scripts -- it does not inherit this repository's CI. The acceptance
+# workflow is not the platform being coupled to a product; it is the family
+# verifying THIS cell, which is a platform plus one specific leaf, and it
+# cannot do that without naming the leaf.
+#
+# Deliberately narrow: the leaf is named, not a pattern, and only under
+# .github/workflows. A workflow naming a DIFFERENT product still fails, and so
+# does the Makefile naming this one -- which is where coupling would actually
+# live. Every sibling platform names its leaf in acceptance.yml; their versions
+# of this test check the Makefile alone and never had to decide.
+# Two names, because verifying this cell needs both: the leaf to check out and
+# the DAG to run. `make verify DAG=<id>` takes the id as a parameter for exactly
+# this reason -- the Makefile does not know it, so the platform stays reusable
+# and only the cell's own verification names it.
+ACCEPTANCE_LEAF = "contoso-data-product-databricks-airflow3"
+ACCEPTANCE_DAG = "contoso_daily"
+ACCEPTANCE_ONLY = ".github/workflows/"
+
 
 def _config_files() -> list[pathlib.Path]:
     """The files that CONFIGURE this platform, from git rather than the disk.
@@ -79,12 +101,15 @@ def test_the_platform_holds_no_product():
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
+        rel = str(path.relative_to(ROOT))
         for n, line in enumerate(text.splitlines(), 1):
             code = line.split("#", 1)[0]
             if "contoso" not in code.lower():
                 continue
             # Strip the allowed vendor names, then see if any mention survives.
             stripped = PENDING_RENAME.sub("", VENDOR_OK.sub("", code))
+            if rel.startswith(ACCEPTANCE_ONLY):
+                stripped = stripped.replace(ACCEPTANCE_LEAF, "").replace(ACCEPTANCE_DAG, "")
             if "contoso" in stripped.lower():
                 offenders.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()[:80]}")
     assert not offenders, (
