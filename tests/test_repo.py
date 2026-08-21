@@ -101,7 +101,11 @@ def test_the_platform_holds_no_product():
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        rel = str(path.relative_to(ROOT))
+        # as_posix(), not str(): on Windows the latter gives
+        # `.github\\workflows\\acceptance.yml` and the prefix below never
+        # matches, so the guard fired on the exempted file there and passed
+        # on Linux -- green on two runners and red on the third.
+        rel = path.relative_to(ROOT).as_posix()
         for n, line in enumerate(text.splitlines(), 1):
             code = line.split("#", 1)[0]
             if "contoso" not in code.lower():
