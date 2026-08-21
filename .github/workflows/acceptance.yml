@@ -33,6 +33,15 @@ jobs:
     # job that only reads should stay that way; this one does not.
     permissions:
       contents: write
+    # THE CATALOG IS THE PRODUCT'S, and the platform refuses to guess it:
+    # compose declares `${UC_CATALOG:?}` with no default, because "a default
+    # here would hand a second product the first one's catalog". So the value
+    # belongs to whoever assembles the cell, which is this workflow. The first
+    # run failed at `make up` with `required variable UC_CATALOG is missing a
+    # value`, which is the platform being right about what it cannot know.
+    # Job-level, because `up`, `verify` and `down` all interpolate compose.
+    env:
+      UC_CATALOG: contoso
     steps:
       # Full history and a usable token: the default checkout is a depth-1
       # detached HEAD, which cannot rebase onto a main that moved during the run.
