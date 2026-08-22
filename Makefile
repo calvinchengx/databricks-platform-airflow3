@@ -52,6 +52,13 @@ up: doctor sources prepare ## Build the worker from the product's pyproject.toml
 # CI runner, and the alternative is every consumer discovering 65532.
 	@mkdir -p "$(DATABRICKS_DATA)" "$(DELTA_DATA)"
 	@chmod 0777 "$(DATABRICKS_DATA)" "$(DELTA_DATA)"
+# EVERY WRITABLE BIND MOUNT, DERIVED FROM COMPOSE. Four failures in one
+# evening were one shape: a container running as a non-root uid, and a host
+# directory it mounts that nobody had created for it. Listing the paths here
+# would mean this platform asserting knowledge of a product's layout, which is
+# the coupling these repositories exist to avoid -- so the list comes from the
+# compose config, which the platform already owns.
+	@$(COMPOSE) config --format json | python3 scripts/writable_mounts.py
 	@echo "platform: product = $(PRODUCT_ABS)"
 	@echo "platform: sources = $(SOURCES_ABS)"
 # SAY WHY, BEFORE THE EVIDENCE IS GONE. `up` resolves depends_on itself, so a
@@ -89,6 +96,16 @@ token: ## Put the workspace credential where the product can read it
 # and the product never looks for this file.
 	@mkdir -p "$(PRODUCT_ABS)/data"
 	@$(COMPOSE) cp databricks:/data/admin.pat "$(PRODUCT_ABS)/data/admin.pat" >/dev/null
+# `compose cp` PRESERVES THE MODE IT HAD IN THE CONTAINER. The emulator writes
+# its PAT 0600 as uid 65532, so the copy lands unreadable by the Airflow worker,
+# which runs as a different uid again:
+#
+#     no workspace token at /opt/product/data/admin.pat ([Errno 13] Permission denied)
+#
+# and `provision` fails authenticating, which reads as a broken product rather
+# than a credential nobody can open. 0644: a token in a throwaway emulator
+# stack, on a directory the product already owns.
+	@chmod 0644 "$(PRODUCT_ABS)/data/admin.pat"
 	@test -s "$(PRODUCT_ABS)/data/admin.pat" || { \
 	  echo "the emulator produced no workspace token -- every task would fail"; \
 	  echo "authenticating, which reads as a broken product rather than a"; \

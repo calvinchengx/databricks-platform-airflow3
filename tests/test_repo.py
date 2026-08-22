@@ -17,7 +17,14 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # contoso-sources is the VENDOR declaration every cell consumes, and the vendor
 # services it generates are named for the company that owns them. Naming it is
 # not naming a product, so these are the documented exceptions.
-VENDOR_OK = re.compile(r"contoso-(sources|pos|web|reference|erp-db|erp-broker)")
+# THE VENDOR NAMES THE GENERATOR ACTUALLY EMITS. `scripts/sources.py` builds a
+# cdc vendor's stack as `{name}-db`, `{name}-broker`, `{name}-connect` and
+# `{name}-seed`; this list carried the first two and not the other two, so
+# naming either of them anywhere in a config file was reported as the platform
+# naming a PRODUCT. It never came up because nothing had written them down
+# until now. Checked against the generator, not against the file that tripped it.
+VENDOR_OK = re.compile(
+    r"contoso-(sources|pos|web|reference|erp-db|erp-broker|erp-connect|erp-seed)")
 
 # KNOWN AND NOT YET FIXED. The platform hands the product four environment
 # variables whose NAMES carry the product's identity: CONTOSO_DELTA,
