@@ -31,7 +31,24 @@ help: ## This list
 up: doctor sources prepare ## Build the worker from the product's pyproject.toml and start the stack
 	@echo "platform: product = $(PRODUCT_ABS)"
 	@echo "platform: sources = $(SOURCES_ABS)"
-	$(COMPOSE) up --build -d
+# SAY WHY, BEFORE THE EVIDENCE IS GONE. `up` resolves depends_on itself, so a
+# container that dies at start-up fails the whole command with one line:
+#
+#     dependency failed to start: container airflow-databricks-databricks-1 exited (1)
+#
+# and nothing about WHY it exited. That is how G48 -- a released emulator that
+# does not boot in this stack -- survived a release and three CI runs without a
+# single line of diagnosis. The logs exist at this moment and are gone as soon
+# as anyone runs `make down`, which CI does in its cleanup step.
+#
+# `ps -a` first because it names which container died and with what code; the
+# logs then say what it said on the way out. Both are bounded (`--tail`) so a
+# noisy stack cannot bury the failure it is meant to explain.
+	@$(COMPOSE) up --build -d || { \
+	  echo "platform: the stack did not come up. what the containers said:"; \
+	  $(COMPOSE) ps -a; \
+	  $(COMPOSE) logs --no-color --tail=80; \
+	  exit 1; }
 	@$(MAKE) --no-print-directory token
 	@echo "platform: Airflow on http://localhost:$${AIRFLOW_PORT:-18082}"
 
