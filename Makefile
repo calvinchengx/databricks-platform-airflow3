@@ -18,6 +18,12 @@ export PRODUCT_NAME := $(notdir $(PRODUCT_ABS))
 include versions.env
 export
 
+# THE EMULATOR'S STATE DIRECTORIES, named here rather than left to compose's
+# `${DATABRICKS_DATA:-./data}` defaults, so that the directory this Makefile
+# creates and the one compose mounts cannot be two different places.
+export DATABRICKS_DATA ?= $(CURDIR)/data
+export DELTA_DATA ?= /tmp/dbx-airflow-delta
+
 FRAGMENT := .sources.generated.yml
 # Where Airflow 3's simple auth manager writes the credential it generates.
 PASSWORD_FILE := /opt/airflow/simple_auth_manager_passwords.json.generated
@@ -29,6 +35,23 @@ help: ## This list
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t20
 
 up: doctor sources prepare ## Build the worker from the product's pyproject.toml and start the stack
+# THE EMULATOR RUNS AS NONROOT AND HAS TO WRITE HERE. `databricks-emulator`'s
+# image declares user 65532; the bind-mount source is created by DOCKER when it
+# does not exist, which makes it root-owned, and the first thing the emulator
+# does is write its identity:
+#
+#     databricks-1 | open /data/identity.json: permission denied
+#
+# The container then exits 1 and `up` reports only `dependency failed to
+# start`. That is G48: a released emulator that "does not boot", diagnosed as
+# soon as the logs were printed and not before. `databricks-platform-jobs` runs
+# the same image green because its compose.py has done this since the split;
+# this platform drives compose from Make and never picked it up.
+#
+# 0777 rather than a matching uid: the host user differs between a laptop and a
+# CI runner, and the alternative is every consumer discovering 65532.
+	@mkdir -p "$(DATABRICKS_DATA)" "$(DELTA_DATA)"
+	@chmod 0777 "$(DATABRICKS_DATA)" "$(DELTA_DATA)"
 	@echo "platform: product = $(PRODUCT_ABS)"
 	@echo "platform: sources = $(SOURCES_ABS)"
 # SAY WHY, BEFORE THE EVIDENCE IS GONE. `up` resolves depends_on itself, so a
