@@ -73,6 +73,19 @@ ACCEPTANCE_NAMES = (
     "contoso_daily",
 )
 ACCEPTANCE_CATALOG = re.compile(r"UC_CATALOG\s*[:=]\s*contoso\b")
+# CORE, which is not a product. `contoso-data-product` holds the transforms,
+# the contracts and the figures every cell must produce; the acceptance run
+# checks it out to assert this run's numbers against them (G50). A second
+# product on this platform would check out the same repository, so naming it
+# couples this platform to nothing.
+#
+# THE NEGATIVE LOOKAHEAD IS THE WHOLE POINT. Listed in ACCEPTANCE_NAMES as a
+# plain substring it would also strip the leading two thirds of every LEAF
+# name, so `contoso-data-product-fabric-airflow3` would become
+# `-fabric-airflow3` and pass -- the same defect the comment above records
+# against listing bare "contoso", one level less obvious. Followed by a hyphen
+# it is a leaf, and a leaf that is not this cell's must still fail.
+ACCEPTANCE_CORE = re.compile(r"contoso-data-product(?!-)")
 ACCEPTANCE_ONLY = ".github/workflows/"
 
 
@@ -105,6 +118,58 @@ def _config_files() -> list[pathlib.Path]:
     return keep
 
 
+def names_a_product(rel: str, line: str) -> bool:
+    """Whether this line couples the platform to a particular product.
+
+    EXTRACTED so the guard can be tested rather than only run. Its exemptions
+    have twice been written in a form that permitted everything -- bare
+    "contoso" once, and `contoso-data-product` as a plain substring would do it
+    again by eating the front of every leaf name -- and an inline loop cannot
+    be handed a line that ought to fail.
+    """
+    code = line.split("#", 1)[0]
+    if "contoso" not in code.lower():
+        return False
+    # Strip the allowed vendor names, then see if any mention survives.
+    stripped = PENDING_RENAME.sub("", VENDOR_OK.sub("", code))
+    if rel.startswith(ACCEPTANCE_ONLY):
+        stripped = ACCEPTANCE_CATALOG.sub("", stripped)
+        for name in ACCEPTANCE_NAMES:
+            stripped = stripped.replace(name, "")
+        # AFTER the exact leaf names, never before: this cell's own leaf has to
+        # be consumed as a whole before a prefix rule sees it.
+        stripped = ACCEPTANCE_CORE.sub("", stripped)
+    return "contoso" in stripped.lower()
+
+
+def test_the_guard_still_catches_a_product_that_is_not_this_one():
+    """THE GUARD FOR THE GUARD. Every exemption above is a hole by construction.
+
+    A workflow line naming a DIFFERENT cell's leaf must still fail, and the
+    Makefile -- where coupling would actually live -- must fail on names the
+    workflow is allowed to carry.
+    """
+    wf = ".github/workflows/acceptance.yml"
+    must_fail = [
+        (wf, "          repository: calvinchengx/contoso-data-product-fabric-airflow3"),
+        (wf, "          path: contoso-data-product-snowflake-tasks"),
+        (wf, "      - run: make verify DAG=contoso_hourly"),
+        ("Makefile", "PRODUCT ?= ../contoso-data-product-databricks-airflow3"),
+        ("Makefile", "DAG ?= contoso_daily"),
+    ]
+    for rel, line in must_fail:
+        assert names_a_product(rel, line), f"the guard permits {line.strip()!r} in {rel}"
+
+    must_pass = [
+        (wf, "          repository: calvinchengx/contoso-data-product"),
+        (wf, "          path: contoso-data-product-databricks-airflow3"),
+        (wf, "      - run: make verify DAG=contoso_daily"),
+        (wf, "      UC_CATALOG: contoso"),
+    ]
+    for rel, line in must_pass:
+        assert not names_a_product(rel, line), f"the guard rejects {line.strip()!r} in {rel}"
+
+
 def test_the_platform_holds_no_product():
     """A platform holds compose, pins, vendors and scripts. Nothing Contoso.
 
@@ -128,16 +193,7 @@ def test_the_platform_holds_no_product():
         # on Linux -- green on two runners and red on the third.
         rel = path.relative_to(ROOT).as_posix()
         for n, line in enumerate(text.splitlines(), 1):
-            code = line.split("#", 1)[0]
-            if "contoso" not in code.lower():
-                continue
-            # Strip the allowed vendor names, then see if any mention survives.
-            stripped = PENDING_RENAME.sub("", VENDOR_OK.sub("", code))
-            if rel.startswith(ACCEPTANCE_ONLY):
-                stripped = ACCEPTANCE_CATALOG.sub("", stripped)
-                for name in ACCEPTANCE_NAMES:
-                    stripped = stripped.replace(name, "")
-            if "contoso" in stripped.lower():
+            if names_a_product(rel, line):
                 offenders.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()[:80]}")
     assert not offenders, (
         "the platform names a product:\n  " + "\n  ".join(offenders)
@@ -164,4 +220,45 @@ def test_the_catalog_is_not_guessed():
     )
     assert not re.search(r"UC_CATALOG:-", compose), (
         "UC_CATALOG has a default; the platform is guessing the product's catalog"
+    )
+
+
+def test_the_acceptance_run_asserts_the_numbers_and_not_only_the_run():
+    """A nightly that proves the DAG RAN proves nothing about the answer.
+
+    G50: across all seven platforms with an acceptance workflow, none compared a
+    snapshot against an expected value. The `publish` task writes
+    product_snapshot.json onto the delta volume and nothing read it back, so
+    gold could have returned different money indefinitely behind a green tick.
+
+    THE PATH IS THE PART THAT CAN ROT, and here it is not even in the repository
+    -- the snapshot lands on a host directory named only by DELTA_DATA's
+    default. So the workflow's path is derived from the compose mount rather
+    than restated, and this fails if the two drift.
+    """
+    raw = (ROOT / ".github" / "workflows" / "acceptance.yml").read_text(encoding="utf-8")
+    wf = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+    assert "scripts/assert_snapshot.py" in wf, (
+        "the acceptance run never asserts the figures core publishes"
+    )
+    core = wf[wf.index("repository: calvinchengx/contoso-data-product\n") :]
+    assert re.search(r"ref: [0-9a-f]{40}", core[: core.index("path:")]), (
+        "the contoso-data-product checkout is not pinned to a commit"
+    )
+    assert wf.index("make verify") < wf.index("scripts/assert_snapshot.py"), (
+        "the numbers are asserted before the run that produces them"
+    )
+
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    inside = re.search(r"CONTOSO_SNAPSHOT:\s*(\S+)", compose)
+    assert inside, "docker-compose.yml no longer says where the snapshot is written"
+    container_dir, name = inside.group(1).rsplit("/", 1)
+    mount = re.search(rf"-\s*(\$\{{\w+:-[^}}]+\}}):{re.escape(container_dir)}\b", compose)
+    assert mount, (
+        f"nothing mounts {container_dir} from the host, so the snapshot the "
+        f"worker writes never reaches the runner"
+    )
+    assert f'{mount.group(1)}/{name}' in raw, (
+        f"the acceptance run reads a different path than the compose mount "
+        f"implies; expected {mount.group(1)}/{name}"
     )
