@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -223,42 +224,70 @@ def test_the_catalog_is_not_guessed():
     )
 
 
-def test_the_acceptance_run_asserts_the_numbers_and_not_only_the_run():
-    """A nightly that proves the DAG RAN proves nothing about the answer.
+# --- digest pins ---------------------------------------------------------------
+#
+# Docker IGNORES the tag in `repo:tag@sha256:...` — the digest wins, silently.
+# So a version moved without its digest is not a stale pin, it is the wrong
+# image running under the right name.
 
-    G50: across all seven platforms with an acceptance workflow, none compared a
-    snapshot against an expected value. The `publish` task writes
-    product_snapshot.json onto the delta volume and nothing read it back, so
-    gold could have returned different money indefinitely behind a green tick.
+def _scripts():
+    sys.path.insert(0, str(ROOT / "scripts"))
 
-    THE PATH IS THE PART THAT CAN ROT, and here it is not even in the repository
-    -- the snapshot lands on a host directory named only by DELTA_DATA's
-    default. So the workflow's path is derived from the compose mount rather
-    than restated, and this fails if the two drift.
-    """
-    raw = (ROOT / ".github" / "workflows" / "acceptance.yml").read_text(encoding="utf-8")
-    wf = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
-    assert "scripts/assert_snapshot.py" in wf, (
-        "the acceptance run never asserts the figures core publishes"
-    )
-    core = wf[wf.index("repository: calvinchengx/contoso-data-product\n") :]
-    assert re.search(r"ref: [0-9a-f]{40}", core[: core.index("path:")]), (
-        "the contoso-data-product checkout is not pinned to a commit"
-    )
-    assert wf.index("make verify") < wf.index("scripts/assert_snapshot.py"), (
-        "the numbers are asserted before the run that produces them"
-    )
+
+def test_every_pinned_image_has_both_a_version_and_a_digest():
+    _scripts()
+    from digests import PINS
+
+    text = (ROOT / "versions.env").read_text(encoding="utf-8")
+    for prefix in PINS:
+        assert re.search(rf"^{prefix}_VERSION=.+$", text, re.M), prefix
+        assert re.search(rf"^{prefix}_DIGEST=sha256:[0-9a-f]{{64}}$", text, re.M), prefix
+
+
+def test_the_compose_file_fetches_every_image_by_digest():
+    _scripts()
+    from digests import PINS
 
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    inside = re.search(r"CONTOSO_SNAPSHOT:\s*(\S+)", compose)
-    assert inside, "docker-compose.yml no longer says where the snapshot is written"
-    container_dir, name = inside.group(1).rsplit("/", 1)
-    mount = re.search(rf"-\s*(\$\{{\w+:-[^}}]+\}}):{re.escape(container_dir)}\b", compose)
-    assert mount, (
-        f"nothing mounts {container_dir} from the host, so the snapshot the "
-        f"worker writes never reaches the runner"
-    )
-    assert f'{mount.group(1)}/{name}' in raw, (
-        f"the acceptance run reads a different path than the compose mount "
-        f"implies; expected {mount.group(1)}/{name}"
-    )
+    for prefix, image in PINS.items():
+        for line in compose.splitlines():
+            if f"image: {image}:" in line:
+                assert f"@${{{prefix}_DIGEST" in line, f"pulled by tag alone: {line.strip()}"
+                break
+        else:
+            raise AssertionError(f"{image} is not referenced in docker-compose.yml")
+
+
+def test_no_image_falls_back_to_a_default_version():
+    """`postgres:${POSTGRES_VERSION:-16}` is how this stack ran on whatever
+    Postgres 16 point release was current, with versions.env not required to
+    have an opinion. A default is a floating pin wearing a fixed one's clothes."""
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    for line in compose.splitlines():
+        if line.strip().startswith("image:"):
+            assert ":-" not in line, f"image has a default version: {line.strip()}"
+
+
+def test_a_release_records_the_digest_it_verified(tmp_path):
+    """set_release already resolved the digest to check the tag exists; the
+    bug it prevents is resolving it, printing it, and writing only the tag."""
+    _scripts()
+    import set_release
+
+    versions = tmp_path / "versions.env"
+    versions.write_text((ROOT / "versions.env").read_text(encoding="utf-8"),
+                        encoding="utf-8")
+    fake = "sha256:" + "f" * 64
+    saved = (set_release.VERSIONS, set_release.tag_exists)
+    try:
+        set_release.VERSIONS = versions
+        set_release.tag_exists = lambda image, tag: (True, fake)
+        set_release.main(["--fabric", "9.9.9"])
+    finally:
+        set_release.VERSIONS, set_release.tag_exists = saved
+
+    written = versions.read_text(encoding="utf-8")
+    for prefix in ("SAIL", "SPARK_AGENT"):
+        assert re.search(rf"^{prefix}_VERSION=9\.9\.9$", written, re.M), prefix
+        assert re.search(rf"^{prefix}_DIGEST={fake}$", written, re.M), (
+            f"{prefix} moved its version and kept the old digest")

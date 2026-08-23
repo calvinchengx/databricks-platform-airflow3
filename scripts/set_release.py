@@ -103,8 +103,15 @@ def main(argv: list[str]) -> int:
 
     wanted = CADENCES[cadence]
 
+    # The registry check already resolves the digest; RECORD it rather than
+    # printing and discarding it. Docker ignores the tag in
+    # `repo:tag@sha256:...`, so a version moved without its digest would leave
+    # the stack pulling the previous image while versions.env named the new one.
+    resolved = {}
     if args.no_verify:
         print("  !! --no-verify: the tags below were NOT checked against the registry")
+        print("     and their digests are therefore left as they are — the pin now")
+        print("     names a version this run did not confirm the digest for.")
     else:
         for var, image in wanted.items():
             ok, detail = tag_exists(image, version)
@@ -112,10 +119,14 @@ def main(argv: list[str]) -> int:
                 sys.exit(f"{image}:{version} does not resolve ({detail}).\n"
                          f"Nothing was written. Check the release published its images "
                          f"before pinning to it.")
+            resolved[var[: -len("_VERSION")]] = detail
             print(f"  {image}:{version} -> {detail[:19]}…")
 
     text = VERSIONS.read_text(encoding="utf-8")
     new, moved = set_vars(text, {v: version for v in wanted})
+    if resolved:
+        new, _ = set_vars(new, {f"{prefix}_DIGEST": digest
+                                for prefix, digest in resolved.items()})
     missing = [v for v in wanted if v not in moved]
     if missing:
         sys.exit(f"{VERSIONS.name} has no {', '.join(missing)} to set — this script "
