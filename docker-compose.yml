@@ -21,7 +21,7 @@
 # neither side.
 services:
   postgres:
-    image: postgres:${POSTGRES_VERSION:-16}
+    image: postgres:${POSTGRES_VERSION:?see versions.env}@${POSTGRES_DIGEST:?see versions.env}
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -32,7 +32,7 @@ services:
       retries: 20
 
   uc:
-    image: unitycatalog/unitycatalog:${UC_VERSION:?see versions.env}
+    image: unitycatalog/unitycatalog:${UC_VERSION:?see versions.env}@${UC_DIGEST:?see versions.env}
     # A CAPPED HEAP AND A CAPPED CONTAINER. Unity Catalog is a JVM, and a JVM
     # with no -Xmx sizes its heap from what it believes the machine has -- here
     # 15.66 GiB, most of which belongs to other stacks. Under `register`, which
@@ -56,7 +56,7 @@ services:
       start_period: 20s
 
   sail:
-    image: ghcr.io/calvinchengx/emulator-sail:${SAIL_VERSION:?see versions.env}
+    image: ghcr.io/calvinchengx/emulator-sail:${SAIL_VERSION:?see versions.env}@${SAIL_DIGEST:?see versions.env}
     depends_on:
       uc: {condition: service_healthy}
     volumes:
@@ -78,7 +78,7 @@ services:
       retries: 30
 
   spark-agent:
-    image: ghcr.io/calvinchengx/emulator-spark-agent:${SPARK_AGENT_VERSION:?see versions.env}
+    image: ghcr.io/calvinchengx/emulator-spark-agent:${SPARK_AGENT_VERSION:?see versions.env}@${SPARK_AGENT_DIGEST:?see versions.env}
     depends_on:
       sail: {condition: service_healthy}
     volumes:
@@ -92,7 +92,7 @@ services:
       retries: 30
 
   databricks:
-    image: ghcr.io/calvinchengx/databricks-emulator:${DATABRICKS_EMULATOR_VERSION:?see versions.env}
+    image: ghcr.io/calvinchengx/databricks-emulator:${DATABRICKS_EMULATOR_VERSION:?see versions.env}@${DATABRICKS_EMULATOR_DIGEST:?see versions.env}
     depends_on:
       spark-agent: {condition: service_healthy}
       uc: {condition: service_healthy}
