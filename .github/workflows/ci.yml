@@ -118,23 +118,6 @@ jobs:
           fi
 
 
-      # The pins are the whole point of this cell: it must run the SAME stack
-      # as the jobs cell, or a difference in their numbers is unattributable.
-      - name: pins match the databricks jobs cell
-        run: |
-          set -a; . ./versions.env; set +a
-          curl -fsSL https://raw.githubusercontent.com/calvinchengx/databricks-platform-jobs/main/versions.env -o /tmp/jobs.env
-          fail=0
-          for var in DATABRICKS_EMULATOR_VERSION SAIL_VERSION SPARK_AGENT_VERSION; do
-            mine=$(eval echo \$$var)
-            theirs=$(grep -E "^$var=" /tmp/jobs.env | cut -d= -f2- || true)
-            if [ -z "$theirs" ]; then
-              echo "::warning::$var is not pinned by databricks-platform-jobs"
-            elif [ "$mine" != "$theirs" ]; then
-              echo "::error::$var is $mine here and $theirs in the jobs cell"
-              fail=1
-            else
-              echo "ok $var=$mine"
-            fi
-          done
-          exit $fail
+      # The cross-repo pin comparison used to live here and now runs on a
+      # schedule in pins.yml: it fires on push and pull_request, and drift
+      # that arrives from the jobs cell needs neither. See G53.
