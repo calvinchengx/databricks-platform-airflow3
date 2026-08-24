@@ -1,0 +1,68 @@
+# The two Databricks cells must run the SAME stack, or a difference in their
+# gold numbers is unattributable -- it could be the orchestrator or it could be
+# the engine, and nobody could say which.
+#
+# THIS RUNS ON A SCHEDULE BECAUSE THE DRIFT ARRIVES FROM ANOTHER REPOSITORY.
+# It used to be a step in ci.yml, which fires on push and pull_request -- both
+# of which need a commit HERE. When the jobs cell moved SAIL_VERSION to 0.33.0
+# this repository did not change, so nothing ran, and the drift sat undetected
+# until a pull request was opened weeks later for an unrelated reason. The
+# check was correct the whole time; it was simply never asked. See G53 in
+# contoso-data-product/docs/01-plan.md.
+#
+# GitHub disables schedules in a repository with 60 days of no activity, and
+# says so by email. If this stops reporting, that is the first thing to check.
+name: Pins
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily -- the sibling can move on any day
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # so a suspected drift can be confirmed without waiting
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pins-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pins:
+    name: pins match the databricks jobs cell
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: compare against the jobs cell
+        run: |
+          set -a; . ./versions.env; set +a
+          curl -fsSL https://raw.githubusercontent.com/calvinchengx/databricks-platform-jobs/main/versions.env -o /tmp/jobs.env
+          fail=0
+          # BOTH halves of every pin. versions.env warns that docker ignores
+          # the tag in `repo:tag@sha256:...` -- the digest silently wins -- so
+          # comparing versions alone would pass two cells that agree on the
+          # label and pull different bytes. That is the exact failure the
+          # digests exist to prevent, and it was not being checked.
+          for name in DATABRICKS_EMULATOR SAIL SPARK_AGENT; do
+            for half in VERSION DIGEST; do
+              var="${name}_${half}"
+              mine=$(eval echo \$$var)
+              theirs=$(grep -E "^$var=" /tmp/jobs.env | cut -d= -f2- || true)
+              if [ -z "$theirs" ]; then
+                echo "::warning::$var is not pinned by databricks-platform-jobs"
+              elif [ "$mine" != "$theirs" ]; then
+                echo "::error::$var is $mine here and $theirs in the jobs cell"
+                fail=1
+              else
+                echo "ok $var=$mine"
+              fi
+            done
+          done
+          if [ "$fail" = 1 ]; then
+            echo "::notice::Bump both halves together with scripts/refresh_digests.py -- editing a version without its digest keeps pulling the old image."
+          fi
+          exit $fail
