@@ -16,9 +16,10 @@ drifted twice while it sat there — to 0.2.5 against a family on 0.2.6, and to
 statement agent sharing `sys.argv` between concurrent tasks.
 
 THE TWO CADENCES. `DATABRICKS_EMULATOR_VERSION` moves with a databricks-emulator
-release. `SAIL_VERSION` and `SPARK_AGENT_VERSION` do not: Sail and the statement
+release. `SAIL_ENGINE_RELEASE` and `SPARK_CLIENT_RELEASE` do not: Sail and the statement
 agent are built and published by **fabric-emulator**, tagged with ITS release
-number, so they move when fabric releases. Bumping one and forgetting the other
+number in an OCI LABEL rather than in their tag, so what moves when fabric
+releases is their digest and that label. Bumping one and forgetting the other
 is what leaves a new workspace binary running last month's compute, which is the
 drift this script exists to prevent — so each cadence is a separate, explicit
 invocation rather than a guess.
@@ -50,9 +51,13 @@ CADENCES = {
     "databricks": {
         "DATABRICKS_EMULATOR_VERSION": "ghcr.io/calvinchengx/databricks-emulator",
     },
+    # _RELEASE, not _VERSION. These two are TAGGED for the dependency they
+    # carry -- pysail 0.7.0, pyspark-client 4.2.0 -- so a fabric release does
+    # not move their tag; it republishes it over new bytes. What moves is the
+    # digest and the record of which release built it.
     "fabric": {
-        "SAIL_VERSION": "ghcr.io/calvinchengx/emulator-sail",
-        "SPARK_AGENT_VERSION": "ghcr.io/calvinchengx/emulator-spark-agent",
+        "SAIL_ENGINE_RELEASE": "ghcr.io/calvinchengx/emulator-sail",
+        "SPARK_CLIENT_RELEASE": "ghcr.io/calvinchengx/emulator-spark-agent",
     },
 }
 
@@ -119,7 +124,7 @@ def main(argv: list[str]) -> int:
                 sys.exit(f"{image}:{version} does not resolve ({detail}).\n"
                          f"Nothing was written. Check the release published its images "
                          f"before pinning to it.")
-            resolved[var[: -len("_VERSION")]] = detail
+            resolved[var.rsplit("_", 1)[0]] = detail
             print(f"  {image}:{version} -> {detail[:19]}…")
 
     text = VERSIONS.read_text(encoding="utf-8")

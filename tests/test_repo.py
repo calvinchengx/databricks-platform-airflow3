@@ -287,7 +287,16 @@ def test_a_release_records_the_digest_it_verified(tmp_path):
         set_release.VERSIONS, set_release.tag_exists = saved
 
     written = versions.read_text(encoding="utf-8")
-    for prefix in ("SAIL", "SPARK_AGENT"):
-        assert re.search(rf"^{prefix}_VERSION=9\.9\.9$", written, re.M), prefix
+    for prefix in ("SAIL_ENGINE", "SPARK_CLIENT"):
+        # What a fabric release moves for these two is the RELEASE and the
+        # digest. Same invariant as before -- never record one without the
+        # other -- one field along.
+        assert re.search(rf"^{prefix}_RELEASE=9\.9\.9$", written, re.M), prefix
         assert re.search(rf"^{prefix}_DIGEST={fake}$", written, re.M), (
-            f"{prefix} moved its version and kept the old digest")
+            f"{prefix} moved its release and kept the old digest")
+        # And the TAG must NOT move. It names the dependency the image carries,
+        # so retagging it onto the release is how the pin stops saying which
+        # Sail is inside -- which is what this scheme exists to prevent.
+        assert not re.search(rf"^{prefix}_VERSION=9\.9\.9$", written, re.M), (
+            f"{prefix}_VERSION was retagged onto the release; it names the "
+            f"dependency, not the release that built it")
