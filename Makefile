@@ -252,6 +252,7 @@ verify: ## Run a DAG and FAIL if it fails:  make verify DAG=contoso_daily
 # which is how a witness stops being one. Refusing with the command printed is
 # the smaller surprise.
 	@test -n "$(DAG)" || { echo "usage: make verify DAG=<dag_id>"; exit 2; }
+	@uv run --frozen --group dev python scripts/check_product_pin.py $(PRODUCT)
 # IT WAITS FOR THE DAG TO EXIST, and that is not politeness. `make up` recreates
 # the metadata database, so for the first tens of seconds afterwards EVERY DAG
 # is absent -- and this check used to call that "no DAG called X", a hard exit 1
