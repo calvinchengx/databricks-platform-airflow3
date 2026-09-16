@@ -278,13 +278,18 @@ def test_a_release_records_the_digest_it_verified(tmp_path):
     versions.write_text((ROOT / "versions.env").read_text(encoding="utf-8"),
                         encoding="utf-8")
     fake = "sha256:" + "f" * 64
-    saved = (set_release.VERSIONS, set_release.tag_exists)
+    # A release that bumped both dependencies; pysail pinned twice, as
+    # fabric-emulator's pyproject.toml really does.
+    pyproject = ('dependencies = ["pysail==8.8.8", "pyspark-client==7.7.7"]\n'
+                 'engine = ["pysail==8.8.8"]\n')
+    saved = (set_release.VERSIONS, set_release.tag_exists, set_release.fetch)
     try:
         set_release.VERSIONS = versions
         set_release.tag_exists = lambda image, tag: (True, fake)
+        set_release.fetch = lambda url: pyproject if "/v9.9.9/" in url else ""
         set_release.main(["--fabric", "9.9.9"])
     finally:
-        set_release.VERSIONS, set_release.tag_exists = saved
+        set_release.VERSIONS, set_release.tag_exists, set_release.fetch = saved
 
     written = versions.read_text(encoding="utf-8")
     for prefix in ("SAIL_ENGINE", "SPARK_CLIENT"):
@@ -294,9 +299,36 @@ def test_a_release_records_the_digest_it_verified(tmp_path):
         assert re.search(rf"^{prefix}_RELEASE=9\.9\.9$", written, re.M), prefix
         assert re.search(rf"^{prefix}_DIGEST={fake}$", written, re.M), (
             f"{prefix} moved its release and kept the old digest")
-        # And the TAG must NOT move. It names the dependency the image carries,
-        # so retagging it onto the release is how the pin stops saying which
-        # Sail is inside -- which is what this scheme exists to prevent.
+        # The TAG never takes the release number. It names the dependency the
+        # image carries, so it moves to what THIS release ships, and only that.
+        # This used to assert it never moved at all, which v0.36.0 disproved
+        # by bumping pysail 0.7.0 -> 0.7.1.
         assert not re.search(rf"^{prefix}_VERSION=9\.9\.9$", written, re.M), (
             f"{prefix}_VERSION was retagged onto the release; it names the "
             f"dependency, not the release that built it")
+    assert re.search(r"^SAIL_ENGINE_VERSION=8\.8\.8$", written, re.M)
+    assert re.search(r"^SPARK_CLIENT_VERSION=7\.7\.7$", written, re.M)
+
+
+def test_a_fabric_release_with_an_ambiguous_dependency_pin_writes_nothing(tmp_path):
+    """Two different pysail pins means the release cannot say which Sail it
+    shipped, and guessing would pin one under a label it may not match."""
+    import pytest
+
+    _scripts()
+    import set_release
+
+    versions = tmp_path / "versions.env"
+    original = (ROOT / "versions.env").read_text(encoding="utf-8")
+    versions.write_text(original, encoding="utf-8")
+    saved = (set_release.VERSIONS, set_release.tag_exists, set_release.fetch)
+    try:
+        set_release.VERSIONS = versions
+        set_release.tag_exists = lambda image, tag: (True, "sha256:" + "e" * 64)
+        set_release.fetch = (
+            lambda url: '"pysail==0.7.0" "pysail==0.7.1" "pyspark-client==4.2.0"')
+        with pytest.raises(SystemExit, match="pysail"):
+            set_release.main(["--fabric", "9.9.9"])
+    finally:
+        set_release.VERSIONS, set_release.tag_exists, set_release.fetch = saved
+    assert versions.read_text(encoding="utf-8") == original

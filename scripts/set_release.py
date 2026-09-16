@@ -27,6 +27,12 @@ invocation rather than a guess.
     python3 scripts/set_release.py --databricks 0.2.7
     python3 scripts/set_release.py --fabric 0.32.0
 
+THE SIDECARS' _VERSION FOLLOWS THE RELEASE'S DEPENDENCY PINS. It names what
+the image carries (pysail, pyspark-client), and this script used to leave it
+alone on the belief a fabric release never changes that. v0.36.0 moved pysail
+0.7.0 -> 0.7.1. `--fabric` now reads both from fabric-emulator's pyproject.toml
+at the release tag, the same pins that chose the images' tags.
+
 THE TAGS ARE CHECKED. Both cadences publish tags that are REBUILT rather than
 moved, so a tag naming nothing is a live possibility and a pin to it fails only
 later, in CI, as a pull error. The registry is asked whether the tag resolves
@@ -41,6 +47,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VERSIONS = ROOT / "versions.env"
@@ -52,14 +59,47 @@ CADENCES = {
         "DATABRICKS_EMULATOR_VERSION": "ghcr.io/calvinchengx/databricks-emulator",
     },
     # _RELEASE, not _VERSION. These two are TAGGED for the dependency they
-    # carry -- pysail 0.7.0, pyspark-client 4.2.0 -- so a fabric release does
-    # not move their tag; it republishes it over new bytes. What moves is the
-    # digest and the record of which release built it.
+    # carry (pysail, pyspark-client), so the release number never goes into
+    # their _VERSION. That moves only to the dependency the release shipped;
+    # see TAGGED_BY.
     "fabric": {
         "SAIL_ENGINE_RELEASE": "ghcr.io/calvinchengx/emulator-sail",
         "SPARK_CLIENT_RELEASE": "ghcr.io/calvinchengx/emulator-spark-agent",
     },
 }
+
+# prefix -> the pin in fabric-emulator's pyproject.toml the sidecar is tagged
+# with. The same map as fabric-emulator's scripts/image_tags.py.
+TAGGED_BY = {"SAIL_ENGINE": "pysail", "SPARK_CLIENT": "pyspark-client"}
+
+# A TAG, not a branch: what the release was built from, and it cannot move.
+FABRIC_PYPROJECT = ("https://raw.githubusercontent.com/calvinchengx/"
+                    "fabric-emulator/v{release}/pyproject.toml")
+
+
+def fetch(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return resp.read().decode("utf-8")
+
+
+def carried_versions(release: str) -> dict[str, str]:
+    """The dependency version each sidecar carries in fabric `release`.
+
+    Read with image_tags.py's own rule: exactly one `==` pin per package.
+    """
+    url = FABRIC_PYPROJECT.format(release=release)
+    try:
+        text = fetch(url)
+    except OSError as err:
+        raise SystemExit(f"cannot read {url}: {err}") from None
+    carried = {}
+    for prefix, package in TAGGED_BY.items():
+        found = set(re.findall(rf'"{re.escape(package)}==([0-9][^"]*)"', text))
+        if len(found) != 1:
+            raise SystemExit(f"v{release} pins {package} as {sorted(found) or 'nothing'}; "
+                             f"expected exactly one == version")
+        carried[prefix] = found.pop()
+    return carried
 
 
 def tag_exists(image: str, tag: str) -> tuple[bool, str]:
@@ -127,19 +167,28 @@ def main(argv: list[str]) -> int:
             resolved[var.rsplit("_", 1)[0]] = detail
             print(f"  {image}:{version} -> {detail[:19]}…")
 
+    updates = {v: version for v in wanted}
+    if cadence == "fabric":
+        if args.no_verify:
+            print("  !! --no-verify: SAIL_ENGINE_VERSION and SPARK_CLIENT_VERSION were")
+            print("     NOT read from the release and are left as they are.")
+        else:
+            updates.update({f"{prefix}_VERSION": dep
+                            for prefix, dep in carried_versions(version).items()})
+
     text = VERSIONS.read_text(encoding="utf-8")
-    new, moved = set_vars(text, {v: version for v in wanted})
+    new, moved = set_vars(text, updates)
     if resolved:
         new, _ = set_vars(new, {f"{prefix}_DIGEST": digest
                                 for prefix, digest in resolved.items()})
-    missing = [v for v in wanted if v not in moved]
+    missing = [v for v in updates if v not in moved]
     if missing:
         sys.exit(f"{VERSIONS.name} has no {', '.join(missing)} to set — this script "
                  f"and the file have drifted apart.")
     VERSIONS.write_text(new, encoding="utf-8")
     for var, old in moved.items():
-        note = "  (unchanged)" if old == version else ""
-        print(f"  {var}: {old} -> {version}{note}")
+        note = "  (unchanged)" if old == updates[var] else ""
+        print(f"  {var}: {old} -> {updates[var]}{note}")
 
     if cadence == "databricks":
         print("  Sail and the spark agent are NOT moved: they ship on fabric's "
