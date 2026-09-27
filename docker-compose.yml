@@ -21,7 +21,7 @@
 # neither side.
 services:
   postgres:
-    image: postgres:${POSTGRES_VERSION:?see versions.env}@${POSTGRES_DIGEST:?see versions.env}
+    image: mirror.gcr.io/library/postgres:${POSTGRES_VERSION:?see versions.env}@${POSTGRES_DIGEST:?see versions.env}
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -32,7 +32,7 @@ services:
       retries: 20
 
   uc:
-    image: unitycatalog/unitycatalog:${UC_VERSION:?see versions.env}@${UC_DIGEST:?see versions.env}
+    image: mirror.gcr.io/unitycatalog/unitycatalog:${UC_VERSION:?see versions.env}@${UC_DIGEST:?see versions.env}
     # A CAPPED HEAP AND A CAPPED CONTAINER. Unity Catalog is a JVM, and a JVM
     # with no -Xmx sizes its heap from what it believes the machine has -- here
     # 15.66 GiB, most of which belongs to other stacks. Under `register`, which
