@@ -251,7 +251,8 @@ def test_the_compose_file_fetches_every_image_by_digest():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     for prefix, image in PINS.items():
         for line in compose.splitlines():
-            if f"image: {image}:" in line:
+            pulled = rf"image: (?:mirror\.gcr\.io/(?:library/)?)?{re.escape(image)}:"
+            if re.search(pulled, line):
                 assert f"@${{{prefix}_DIGEST" in line, f"pulled by tag alone: {line.strip()}"
                 break
         else:
